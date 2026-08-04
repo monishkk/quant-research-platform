@@ -1,0 +1,16 @@
+# Core computational stack
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+pyarrow>=14
+pyyaml>=6.0
+
+# Market data (free adjusted prices for ETFs)
+yfinance>=0.2.40
+
+# Testing
+pytest>=8.0
+
+# Notebooks (optional; only needed to run notebooks/)
+jupyter>=1.0

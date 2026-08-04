@@ -1,0 +1,16 @@
+# Normalise line endings in the repository to LF regardless of the checkout
+# platform. Without this, committing from Windows stores CRLF and every file
+# reads as modified on Linux/macOS -- noisy diffs that obscure real changes.
+* text=auto eol=lf
+
+# Binary artefacts must never be line-ending converted.
+*.png   binary
+*.parquet binary
+
+# Notebooks are JSON: keep them LF so executed outputs diff cleanly.
+*.ipynb text eol=lf
+
+# Generated report artefacts are the project's deliverable and are committed
+# deliberately, but they are noise in diffs and language statistics.
+reports/momentum/** linguist-generated=true
+notebooks/** linguist-documentation=true

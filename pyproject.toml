@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-platform"
+version = "0.1.0"
+description = "A minimal, tested, reproducible research platform for cross-sectional ETF momentum."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Monish Krishnakumar" }]
+keywords = ["quant", "backtesting", "momentum", "research"]
+dependencies = [
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "pyarrow>=14",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+data = ["yfinance>=0.2.40"]
+dev = ["pytest>=8.0"]
+notebooks = ["jupyter>=1.0", "notebook>=7.0"]
+
+[project.scripts]
+quant-run = "quant_platform.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

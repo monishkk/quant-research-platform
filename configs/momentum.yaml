@@ -1,0 +1,48 @@
+# =============================================================================
+# Cross-sectional momentum on liquid US ETFs.
+#
+# This single file is the source of truth for a run. Reproduce everything with:
+#     python -m quant_platform.run --config configs/momentum.yaml
+# =============================================================================
+
+data:
+  # Universe: 9 liquid, cross-asset ETFs (equity, intl, bonds, gold, REITs, commodities)
+  symbols: [SPY, QQQ, IWM, EFA, EEM, TLT, GLD, VNQ, DBC]
+  benchmark: SPY
+  # Start early enough that a 12-month signal is available from the training start.
+  start: "2007-01-01"
+  end: "2025-12-31"
+  source: yfinance              # yfinance | synthetic
+  allow_synthetic_fallback: true  # if the download fails, use a seeded synthetic panel
+
+strategy:
+  name: cross_sectional_momentum
+  lookback_days: 252            # ~12 trading months
+  skip_days: 21                 # skip the most recent ~1 month (short-term reversal)
+  holdings: 3                   # hold the top N ranked ETFs
+  rebalance: monthly            # weekly | monthly | quarterly
+  max_weight: 0.40              # per-name cap applied to target weights
+
+portfolio:
+  initial_capital: 100000
+  commission_bps: 2             # per unit of turnover
+  slippage_bps: 3               # per unit of turnover
+  execution_lag: 1              # periods to delay execution -> no look-ahead
+
+validation:
+  training_end: "2018-12-31"    # 2010-2018 research / training
+  validation_end: "2022-12-31"  # 2019-2022 validation
+  test_end: "2025-12-31"        # 2023-2025 final, untouched test
+
+sensitivity:
+  lookback_months: [3, 6, 9, 12]
+  holdings: [1, 2, 3, 4]
+  rebalance: [weekly, monthly, quarterly]
+  cost_bps: [0, 5, 10, 20]
+
+reporting:
+  output_dir: reports/momentum
+  risk_free_rate: 0.0           # annualized; 0 keeps Sharpe interpretation simple
+  periods_per_year: 252
+
+seed: 42
