@@ -257,6 +257,21 @@ def main(argv: list[str] | None = None) -> int:
         marginals = validation.sensitivity_marginals(sensitivity, "sharpe")
         logger.info("Sensitivity grid: %d combinations evaluated", len(sensitivity))
 
+    # ---- 6b. Statistical significance -------------------------------------- #
+    # Runs after the grid because deflation needs to know how large the search
+    # was: the hurdle a result must clear depends on how many were tried.
+    sig_cfg = cfg.get("significance", {})
+    sig_results, sig_table = _run_significance(
+        strategy.net_returns, benchmark_returns, sensitivity,
+        train_returns=strategy.slice(splits[0].start, splits[0].end).net_returns,
+        n_boot=sig_cfg.get("n_boot", 5000),
+        block_length=sig_cfg.get("block_length"),
+        confidence=sig_cfg.get("confidence", 0.95),
+        periods_per_year=ppy,
+        risk_free_rate=rf,
+        seed=cfg.get("seed", 42),
+    )
+
     # ---- 7. Figures ------------------------------------------------------- #
     logger.info("Rendering figures -> %s", out_dir)
     equity_curves = {name: r.equity for name, r in all_results.items()}
@@ -285,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     if not sensitivity.empty:
         figures["sensitivity"] = reporting.plot_sensitivity_heatmap(
             sensitivity, out_dir / "sensitivity.png", "sharpe", "lookback_months", "holdings")
+    if sig_results.get("bootstrap") is not None:
+        bs = sig_results["bootstrap"]
+        figures["bootstrap"] = reporting.plot_bootstrap_distribution(
+            bs["draws"], bs["difference"], bs["ci_low"], bs["ci_high"],
+            out_dir / "bootstrap_sharpe.png", p_value=bs["p_value"])
 
     # ---- 8. CSV artefacts ------------------------------------------------- #
     comparison.to_csv(out_dir / "metrics.csv")
@@ -298,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         loyo.to_csv(out_dir / "leave_one_year_out.csv")
     if not sensitivity.empty:
         sensitivity.to_csv(out_dir / "sensitivity.csv", index=False)
+    if not sig_table.empty:
+        sig_table.to_csv(out_dir / "significance.csv", index=False)
     # The benchmark series ships alongside the strategy so that any sub-period
     # claim in the report (e.g. "the edge over 2010-2025 is negative") can be
     # re-derived from this one file, rather than having to be taken on trust.
@@ -315,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     narrative = build_narrative(
         cfg, report, provenance, comparison, split_metrics, bench_splits,
         sensitivity, marginals, regimes, strategy, splits, show_test=args.show_test,
-        leave_one_year_out=loyo,
+        leave_one_year_out=loyo, significance=sig_results,
     )
     kpis = build_kpis(comparison, strategy.name, split_metrics, show_test=args.show_test)
 
@@ -329,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         "regimes": regimes.round(4),
         "years": years.round(4),
         "loyo": loyo.round(4),
+        "significance": sig_table,
         **{f"sens_{k}": _label_marginal(df, k) for k, df in marginals.items()},
     }
 
@@ -355,6 +378,78 @@ def main(argv: list[str] | None = None) -> int:
         elapsed, run_warnings, show_test=args.show_test,
     )
     return 0
+
+
+def _run_significance(
+    strategy_returns: pd.Series,
+    benchmark_returns: pd.Series,
+    sensitivity: pd.DataFrame,
+    train_returns: pd.Series,
+    n_boot: int,
+    block_length: float | None,
+    confidence: float,
+    periods_per_year: int,
+    risk_free_rate: float,
+    seed: int,
+) -> tuple[dict, pd.DataFrame]:
+    """Bootstrap the Sharpe advantage and deflate it for the size of the search.
+
+    Returns the raw results (including the bootstrap draws, for plotting) and a
+    tidy one-row-per-quantity table for the CSV.
+    """
+    from quant_platform import significance as sig
+
+    results: dict = {"bootstrap": None, "deflation_full": None, "deflation_train": None}
+    rows: list[dict] = []
+
+    def add(metric: str, value, note: str = "") -> None:
+        rows.append({"metric": metric, "value": value, "note": note})
+
+    try:
+        bs = sig.bootstrap_sharpe_difference(
+            strategy_returns, benchmark_returns, n_boot=n_boot,
+            block_length=block_length, confidence=confidence,
+            periods_per_year=periods_per_year, risk_free_rate=risk_free_rate, seed=seed,
+        )
+        results["bootstrap"] = bs
+        pct = int(round(confidence * 100))
+        add("strategy_sharpe", round(bs["strategy_sharpe"], 6))
+        add("benchmark_sharpe", round(bs["benchmark_sharpe"], 6))
+        add("sharpe_difference", round(bs["difference"], 6), "strategy minus benchmark")
+        add(f"ci_low_{pct}", round(bs["ci_low"], 6), "stationary block bootstrap")
+        add(f"ci_high_{pct}", round(bs["ci_high"], 6), "stationary block bootstrap")
+        add("bootstrap_se", round(bs["bootstrap_se"], 6), "SE of the difference, paired resampling")
+        add("p_value", round(bs["p_value"], 6), "two-sided, null of no difference")
+        add("block_length_days", bs["block_length"], "mean geometric block length")
+        add("n_resamples", bs["n_boot"])
+    except (ValueError, KeyError) as exc:
+        logger.warning("Bootstrap skipped: %s", exc)
+
+    if not sensitivity.empty and "sharpe" in sensitivity:
+        trials = sensitivity["sharpe"].dropna()
+        try:
+            full = sig.deflated_sharpe_ratio(
+                strategy_returns, trial_sharpes=trials,
+                periods_per_year=periods_per_year, risk_free_rate=risk_free_rate)
+            train = sig.deflated_sharpe_ratio(
+                train_returns, trial_sharpes=trials,
+                periods_per_year=periods_per_year, risk_free_rate=risk_free_rate)
+            results["deflation_full"] = full
+            results["deflation_train"] = train
+
+            add("n_trials", full["n_trials"], "sensitivity grid cells")
+            add("noise_hurdle_sharpe", round(full["noise_hurdle_sharpe"], 6),
+                "expected best Sharpe from this many trials of pure noise")
+            add("best_grid_sharpe", round(float(trials.max()), 6), "training window")
+            add("psr_vs_zero_full", round(full["psr_vs_zero"], 6))
+            add("deflated_sharpe_full", round(full["deflated_sharpe"], 6))
+            add("psr_vs_zero_training", round(train["psr_vs_zero"], 6))
+            add("deflated_sharpe_training", round(train["deflated_sharpe"], 6),
+                "same window as the grid; the like-for-like comparison")
+        except ValueError as exc:
+            logger.warning("Deflation skipped: %s", exc)
+
+    return results, pd.DataFrame(rows)
 
 
 def _numeric(df: pd.DataFrame) -> pd.DataFrame:

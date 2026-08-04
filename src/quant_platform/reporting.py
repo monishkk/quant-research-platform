@@ -398,6 +398,52 @@ def plot_sensitivity_heatmap(
     return _save(fig, path)
 
 
+def plot_bootstrap_distribution(
+    draws,
+    observed: float,
+    ci_low: float,
+    ci_high: float,
+    path: Path | None = None,
+    title: str = "Bootstrap distribution of the Sharpe advantage over the benchmark",
+    p_value: float | None = None,
+) -> str:
+    """Where the observed edge sits inside its own sampling distribution.
+
+    The single most honest chart in the report: if the zero line sits comfortably
+    inside the mass, the edge is not distinguishable from luck, and that is
+    visible at a glance in a way a p-value in a table is not.
+    """
+    import numpy as np
+
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    draws = np.asarray(draws, dtype=float)
+    draws = draws[np.isfinite(draws)]
+
+    # Shared bin edges for both layers. Letting each call choose its own bins
+    # over its own range misaligns the overlay, so the highlighted interval
+    # appears ragged instead of nesting exactly inside the outer distribution.
+    _, edges = np.histogram(draws, bins=60)
+    ax.hist(draws, bins=edges, color=SERIES_COLORS[0], alpha=0.45,
+            edgecolor="none", label="Bootstrap resamples")
+
+    inside = (draws >= ci_low) & (draws <= ci_high)
+    ax.hist(draws[inside], bins=edges, color=SERIES_COLORS[0], alpha=0.90,
+            edgecolor="none", label="95% confidence interval")
+
+    ax.axvline(0.0, color=PALETTE.get("bad", "#c0392b"), linewidth=2.0,
+               label="No advantage (zero)")
+    ax.axvline(observed, color=PALETTE.get("good", "#1e8449"), linewidth=2.0,
+               linestyle="--", label=f"Observed ({observed:+.3f})")
+
+    ax.set_xlabel("Sharpe ratio difference (strategy - benchmark)")
+    ax.set_ylabel("Resamples")
+    subtitle = f"   [95% CI {ci_low:+.3f} to {ci_high:+.3f}"
+    subtitle += f", p = {p_value:.3f}]" if p_value is not None else "]"
+    ax.set_title(title + subtitle)
+    ax.legend(loc="upper right", fontsize=8)
+    return _save(fig, path)
+
+
 def plot_split_bars(
     split_metrics: pd.DataFrame,
     path: Path | None = None,
@@ -650,6 +696,12 @@ def build_html_report(
             "<h3>How much of the edge is one year?</h3>",
             narrative.get("loyo", ""),
             _table(tables.get("loyo", pd.DataFrame())),
+            "<h3>Is the edge distinguishable from luck?</h3>",
+            narrative.get("significance", ""),
+            _img(figures.get("bootstrap", ""),
+                 "Bootstrap distribution of the Sharpe advantage. If zero sits inside the "
+                 "shaded interval, the edge is within sampling noise."),
+            _table(tables.get("significance", pd.DataFrame())),
         )
     )
 

@@ -11,7 +11,9 @@ Reproduce: `python -m quant_platform.run --config configs/momentum.yaml`
 
 The strategy produces a higher Sharpe ratio than SPY (0.78 vs 0.65) with roughly half the maximum drawdown (-26% vs -51%). It also earned **less money** than SPY (11.03% vs 11.65% annualised).
 
-More importantly, **the entire risk-adjusted edge is attributable to a single year.** Excluding 2008, the Sharpe advantage over SPY falls from +0.124 to **-0.015** — it disappears. The full-sample gap is approximately **0.5 standard errors** from zero.
+More importantly, **the entire risk-adjusted edge is attributable to a single year.** Excluding 2008, the Sharpe advantage over SPY falls from +0.124 to **-0.015** — it disappears.
+
+Two significance tests agree. A stationary block bootstrap puts the 95% interval on that +0.124 advantage at **[-0.243, +0.455]**, p = 0.485. And because the 192-cell parameter grid is itself a search, the result must clear the best Sharpe such a search would produce from pure noise — **0.410**; against that hurdle the Deflated Sharpe Ratio is **0.700**, short of the conventional 0.95 bar.
 
 The correct conclusion is not "cross-sectional ETF momentum works." It is:
 
@@ -159,6 +161,34 @@ The right quantity is the **edge**, and it is stable but small: +0.079, +0.155, 
 
 Note also that in every window the strategy's CAGR is *below* SPY's. The edge is entirely a risk story.
 
+### Is the edge distinguishable from luck?
+
+Two separate questions, answered with two separate tools.
+
+**Is +0.124 different from zero?** The analytic Sharpe standard error assumes iid normal returns; these returns are neither (skew −0.17, excess kurtosis 4.72). A **stationary block bootstrap** — 5,000 resamples, geometric blocks averaging 17 days — resamples the strategy and benchmark on *identical* draws, so their correlation survives and the interval is on the difference itself rather than on two independent levels.
+
+| | |
+|---|---|
+| Sharpe advantage | **+0.124** |
+| 95% confidence interval | **[−0.243, +0.455]** |
+| Bootstrap standard error | 0.179 |
+| Two-sided p-value | **0.485** |
+
+The interval comfortably contains zero. Excluding 2008 the advantage is −0.015 with p = 0.931.
+
+**Would +0.124 look impressive even from a worthless strategy?** Searching 192 configurations is itself a source of apparent performance: the maximum of 192 noisy draws is positive even when every draw has zero expectation. Given the dispersion actually observed across the grid, the expected best Sharpe from 192 trials of pure noise is **0.410**.
+
+| | Against zero (PSR) | Against the 0.410 noise hurdle (DSR) |
+|---|---|---|
+| Training window | 0.969 | **0.700** |
+| Full sample | 0.999 | 0.938 |
+
+Measured against zero the strategy is convincing. Measured against what the search itself could have produced, it is not: **0.700 falls short of the conventional 0.95 bar.**
+
+Two qualifications, both favouring the strategy, and both stated because omitting them would overstate the case. The base configuration was fixed in advance from the literature convention, so it never benefited from the search being penalised here. And the Deflated Sharpe correction assumes independent trials, whereas neighbouring grid cells share most of their trades — the effective number of trials is smaller than 192 and the true hurdle is therefore below 0.410. The stricter number is reported anyway, because it is the one that would apply had the parameters been chosen by looking at the grid.
+
+Reproduce from `reports/momentum/significance.csv`.
+
 ### Parameter sensitivity (training window only, 192 combinations)
 
 All 192 cells are evaluated on **one common window** (2,708 days, starting 2008-04-01). Cells go live on different dates — a 3-month lookback forms a signal months before a 12-month one, and a quarterly rebalance waits for the next quarter end — so scoring each on its own start date would let the grid compare *periods* as well as parameters. Given that this sample's earliest months are crisis months that dominate the result, that confound is not negligible: it was worth 0.015 of Sharpe on the monthly cells.
@@ -230,13 +260,13 @@ Each row deletes one calendar year and recomputes the Sharpe advantage over SPY 
 
 **Removing 2008 eliminates the edge entirely.** No other year moves it by more than 0.07. Excluding both GFC years (2008–09), the edge is **-0.053** — the strategy slightly *underperforms* SPY on a risk-adjusted basis over 2010–2025.
 
-Against a Sharpe standard error of **±0.270** for this sample length, the full-sample gap of +0.124 is roughly **0.5 standard errors** from zero. And that formula assumes IID returns, making it an *optimistic* estimate of true uncertainty for autocorrelated, fat-tailed data.
+The analytic Sharpe standard error for this sample length is ±0.270, but that is the error on a *single* Sharpe, not on the difference between two correlated ones — the wrong yardstick for the claim being made. The paired bootstrap above gives the right one: **0.179**, putting the gap at 0.69 standard errors rather than 0.46. That cuts mildly in the strategy's favour and changes nothing: p = 0.485.
 
 ## 9. Failure analysis
 
 **1. The edge is one crisis.** Stated above and worth restating: excluding 2008, there is no risk-adjusted edge over SPY. The strategy has not been shown to beat the index; it has been shown to have survived one crisis better than the index did. Those are different claims and only the second is supported.
 
-**2. The result is not statistically significant.** +0.124 Sharpe against a ±0.270 standard error. Nothing here establishes that the strategy beats the benchmark.
+**2. The result is not statistically significant, by either test.** The bootstrap 95% interval on the +0.124 advantage is [−0.243, +0.455] (p = 0.485), and the Deflated Sharpe Ratio against the 192-cell search hurdle is 0.700 — short of 0.95. Nothing here establishes that the strategy beats the benchmark.
 
 **3. It earned less money than the index.** 11.03% vs 11.65% annualised. Only attractive to an investor who can lever it back to the index's risk level, or who values the shallower drawdown for its own sake.
 
@@ -270,7 +300,7 @@ Against a Sharpe standard error of **±0.270** for this sample length, the full-
 2. **Absolute-momentum overlay.** Require a positive trailing return, not merely a top-3 rank; hold cash otherwise. Directly addresses the 2018-style failure where the "best" asset is still falling.
 3. **Risk-parity weighting.** Equal-weighting GLD and QQQ assigns equal capital and wildly unequal risk.
 4. **Widen the universe.** Breadth is the binding constraint on this design.
-5. **Block bootstrap and Deflated Sharpe.** Confidence intervals via stationary block bootstrap, plus a multiple-testing correction for the size of the parameter search. Given the significance finding, this should arguably be first.
+5. **Walk-forward validation.** Re-select parameters on a rolling past-only window and evaluate forward, repeatedly. The sensitivity grid shows the lookback dimension is unstable; walk-forward tests the consequence directly, by asking whether re-optimising on information available at the time would have helped. Given the instability the expected answer is no — worth demonstrating rather than assuming. This is now the largest remaining gap.
 6. **Weight drift and order-level execution.**
 7. **Cross-check against VectorBT.** Agreement is evidence the accounting is right; disagreement localises a bug.
 
@@ -282,6 +312,6 @@ Against a Sharpe standard error of **±0.270** for this sample length, the full-
 python -m quant_platform.run --config configs/momentum.yaml
 ```
 
-Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 140 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
+Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 165 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
 
 All numbers in this report are produced by that command. The leave-one-year-out table is `leave_one_year_out.csv`. The 2010-onwards figure is re-derivable from `strategy_timeseries.csv`, which ships both the strategy and the benchmark return series precisely so that sub-period claims can be checked rather than taken on trust.

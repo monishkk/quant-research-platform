@@ -40,6 +40,13 @@ sensitivity:
   rebalance: [weekly, monthly, quarterly]
   cost_bps: [0, 5, 10, 20]
 
+significance:
+  # Stationary block bootstrap for the Sharpe advantage, plus a Deflated Sharpe
+  # correction for the size of the sensitivity grid above.
+  n_boot: 5000
+  block_length: null            # null -> the n**(1/3) rate (~17 days here)
+  confidence: 0.95
+
 reporting:
   output_dir: reports/momentum
   risk_free_rate: 0.0           # annualized; 0 keeps Sharpe interpretation simple

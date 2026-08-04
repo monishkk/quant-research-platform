@@ -40,8 +40,17 @@ execution:
 > **Excluding 2008, the Sharpe advantage over SPY falls from +0.124 to −0.015. It disappears.**
 
 No other year moves the edge by more than 0.07. Over 2010–2025 the strategy slightly
-*underperforms* SPY risk-adjusted (−0.053). Against a Sharpe standard error of **±0.270** for this
-sample length, the full-sample gap of +0.124 is roughly **half a standard error** from zero.
+*underperforms* SPY risk-adjusted (−0.053).
+
+A stationary block bootstrap (5,000 paired resamples, 17-day mean block) puts the 95% confidence
+interval on that +0.124 advantage at **[−0.243, +0.455]**, with **p = 0.485**. And because the
+192-cell sensitivity grid is itself a search, the edge has to clear the best Sharpe that many
+trials of pure noise would be expected to produce — a hurdle of **0.410**. Against it the
+**Deflated Sharpe Ratio is 0.700**, short of the conventional 0.95 bar.
+
+Two things cut the other way, and the report says so: the parameters were pre-committed from the
+literature rather than picked from the grid, and the deflation assumes trials are independent when
+neighbouring cells share most of their trades. But the direction of the result does not change.
 
 Three further caveats the headline table hides:
 
@@ -83,7 +92,7 @@ Run the test suite:
 python -m pytest
 ```
 
-140 tests, ~3 seconds. They are the reason to trust anything above.
+165 tests, ~4 seconds. They are the reason to trust anything above.
 
 ---
 
@@ -98,10 +107,12 @@ reports/momentum/
 ├── regimes.csv                 # performance by market regime
 ├── calendar_years.csv          # year-by-year vs benchmark
 ├── leave_one_year_out.csv      # how much of the edge rests on any single year
-├── strategy_timeseries.csv     # equity, returns, turnover, costs, exposure
+├── significance.csv            # bootstrap CI, p-value, Deflated Sharpe, noise hurdle
+├── strategy_timeseries.csv     # strategy + benchmark returns, turnover, costs, exposure
 ├── equity_curve.png            drawdown.png            rolling_sharpe.png
 ├── rolling_volatility.png      turnover.png            exposure.png
 ├── monthly_returns.png         sensitivity.png         in_vs_out_sample.png
+├── bootstrap_sharpe.png        # where the observed edge sits in its own noise distribution
 ```
 
 Useful flags:

@@ -103,6 +103,7 @@ def build_narrative(
     splits,
     show_test: bool = False,
     leave_one_year_out: pd.DataFrame | None = None,
+    significance: dict | None = None,
 ) -> dict[str, str]:
     d, s, p, v = cfg["data"], cfg["strategy"], cfg["portfolio"], cfg["validation"]
     name = strategy.name
@@ -473,6 +474,8 @@ def build_narrative(
     n["sensitivity"] = _sensitivity_prose(sensitivity, marginals, cost_drag_sharpe, total_bps)
 
     # leave-one-year-out
+    n["significance"] = _significance_prose(significance)
+
     n["loyo"] = _p(
         "Each row deletes one calendar year and recomputes the strategy's Sharpe advantage "
         "over the benchmark from the remaining data. <code>edge_change</code> is how much the "
@@ -523,9 +526,12 @@ def build_narrative(
         "targets the 2008-style failure mode where the 'best' asset is still falling.</li>"
         "<li><strong>Widen the universe.</strong> More assets improves breadth, the binding "
         "constraint on this design.</li>"
-        "<li><strong>Block bootstrap and Deflated Sharpe.</strong> Confidence intervals via "
-        "stationary block bootstrap, and a multiple-testing correction for the size of the "
-        "parameter search.</li>"
+        "<li><strong>Walk-forward validation.</strong> Re-select parameters on a rolling "
+        "past-only window and evaluate forward, repeatedly. The sensitivity grid shows the "
+        "lookback dimension is unstable; walk-forward tests the consequence directly, by asking "
+        "whether re-optimising on information actually available at the time would have helped. "
+        "Given the instability, the expected answer is no -- which is worth demonstrating rather "
+        "than assuming.</li>"
         "<li><strong>Weight drift and order-level execution.</strong> Model drift between "
         "rebalances, then participation-rate-based impact.</li>"
         "<li><strong>Cross-check against VectorBT.</strong> Reproduce the headline result in "
@@ -725,6 +731,89 @@ def _decay_phrase(decay: float) -> str:
                 "optimistically biased by construction.")
     return ("<strong>Substantial decay out of sample.</strong> A drop of this size suggests "
             "the in-sample result was substantially a fit to that particular period.")
+
+
+def _significance_prose(significance: dict | None) -> str:
+    """Report the bootstrap and the deflation, and say what they mean.
+
+    Written so the conclusion follows from the numbers rather than being
+    asserted alongside them: each branch below states the threshold it is
+    comparing against, so a reader can disagree with the threshold rather than
+    having to take the verdict on faith.
+    """
+    if not significance:
+        return ""
+
+    parts: list[str] = []
+    bs = significance.get("bootstrap")
+    if bs:
+        pct = int(round(bs["confidence"] * 100))
+        crosses_zero = bs["ci_low"] <= 0 <= bs["ci_high"]
+        parts.append(
+            _p(
+                f"The strategy's Sharpe advantage over the benchmark is "
+                f"<strong>{bs['difference']:+.3f}</strong>. Resampling the two return series "
+                f"together with a stationary block bootstrap "
+                f"({bs['n_boot']:,} resamples, mean block {bs['block_length']:.0f} days) puts the "
+                f"{pct}% confidence interval at <strong>[{bs['ci_low']:+.3f}, "
+                f"{bs['ci_high']:+.3f}]</strong>, with a two-sided p-value of "
+                f"<strong>{bs['p_value']:.3f}</strong>. "
+                + (
+                    "The interval contains zero, so the advantage is not distinguishable "
+                    "from sampling variation at this sample length."
+                    if crosses_zero
+                    else "The interval excludes zero."
+                )
+            )
+        )
+        parts.append(
+            _p(
+                "Blocks rather than individual days, because daily strategy returns are "
+                "autocorrelated and an iid bootstrap would understate the uncertainty. The two "
+                "series are resampled on the <em>same</em> draws, which preserves their "
+                "correlation -- bootstrapping them independently would inflate the interval on "
+                "their difference and make the test far too conservative."
+            )
+        )
+
+    train = significance.get("deflation_train")
+    full = significance.get("deflation_full")
+    if train and full:
+        hurdle = train["noise_hurdle_sharpe"]
+        dsr = train["deflated_sharpe"]
+        verdict = (
+            "clears the conventional 0.95 bar"
+            if dsr >= 0.95
+            else "falls short of the conventional 0.95 bar"
+        )
+        parts.append(
+            _p(
+                f"Searching {train['n_trials']} parameter combinations is itself a source of "
+                f"apparent performance. The expected best Sharpe from {train['n_trials']} trials "
+                f"of pure noise, given the dispersion actually observed across the grid, is "
+                f"<strong>{hurdle:.3f}</strong> -- that is what this search could have produced "
+                f"from nothing. Measured against zero the strategy's Probabilistic Sharpe Ratio "
+                f"is {train['psr_vs_zero']:.3f} on the grid's own window; measured against the "
+                f"noise hurdle, the <strong>Deflated Sharpe Ratio is {dsr:.3f}</strong>, which "
+                f"{verdict}."
+            )
+        )
+        parts.append(
+            _p(
+                f"Two honest qualifications, both of which cut in the strategy's favour. The "
+                f"base configuration was fixed in advance from the literature convention rather "
+                f"than selected from the grid, so it was never the beneficiary of the search the "
+                f"deflation is penalising. And the correction assumes the trials are independent "
+                f"when neighbouring cells share most of their trades, which makes the effective "
+                f"number of trials smaller and the true hurdle lower than {hurdle:.3f}. "
+                f"On the full sample the deflated figure rises to "
+                f"{full['deflated_sharpe']:.3f}. The reason to report the stricter number anyway "
+                f"is that it is the one that would apply had the parameters been chosen by "
+                f"looking."
+            )
+        )
+
+    return "\n".join(parts)
 
 
 def _lookback_stability_prose(lb: pd.DataFrame) -> str:
