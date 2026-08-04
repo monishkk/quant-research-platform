@@ -184,6 +184,25 @@ def test_sensitivity_reports_exposure(sensitivity):
     assert (sensitivity["avg_exposure"] > 0).all()
 
 
+def test_every_marginal_dimension_reaches_the_report(sensitivity):
+    """Each grid dimension must produce a table the report actually renders.
+
+    The report used to name four table keys explicitly while the marginals were
+    keyed by the raw column names, so ``lookback_months`` and ``cost_bps`` never
+    matched and two of the four tables silently rendered as "No data." Nothing
+    failed -- the report simply omitted a third of its own sensitivity analysis.
+    """
+    marginals = validation.sensitivity_marginals(sensitivity, "sharpe")
+    assert set(marginals) == {"lookback_months", "holdings", "rebalance", "cost_bps"}
+
+    # run.py prefixes each key; the report renders every key with that prefix.
+    tables = {f"sens_{k}": df for k, df in marginals.items()}
+    rendered = [k for k in tables if k.startswith("sens_")]
+    assert len(rendered) == len(marginals)
+    for key in rendered:
+        assert not tables[key].empty, f"{key} would render as 'No data.'"
+
+
 def test_sensitivity_cells_share_one_evaluation_window(realistic_prices):
     """Every grid cell must be measured over the same dates.
 

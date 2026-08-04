@@ -685,10 +685,12 @@ def build_html_report(
             "<h3>Parameter sensitivity</h3>",
             narrative.get("sensitivity", ""),
             _img(figures.get("sensitivity", ""), "Mean Sharpe across the parameter grid, training window only."),
-            _table(tables.get("sens_lookback", pd.DataFrame())),
-            _table(tables.get("sens_holdings", pd.DataFrame())),
-            _table(tables.get("sens_rebalance", pd.DataFrame())),
-            _table(tables.get("sens_cost", pd.DataFrame())),
+            # Render whatever marginal tables were supplied, in the order they
+            # were built, rather than naming them here. The dimension names come
+            # from the sensitivity config ("lookback_months", "cost_bps", ...),
+            # so a hardcoded list silently drops any table whose key does not
+            # match -- which is exactly what happened to lookback and cost.
+            *(_table(tables[k]) for k in tables if k.startswith("sens_")),
             "<h3>Performance by market regime</h3>",
             _table(tables.get("regimes", pd.DataFrame())),
             "<h3>Calendar years</h3>",

@@ -488,7 +488,7 @@ def build_narrative(
     # ---------------------------------------------------------------- 9 ---- #
     n["failure"] = _failure_prose(f, b, sp, regimes, cost_drag_sharpe, lag_decay,
                                   vs_spy, vs_rand, oos_decay, total_bps, synthetic,
-                                  leave_one_year_out)
+                                  leave_one_year_out, significance)
 
     # --------------------------------------------------------------- 10 ---- #
     n["limits"] = (
@@ -935,7 +935,7 @@ def _sensitivity_prose(sensitivity, marginals, cost_drag_sharpe, total_bps) -> s
     return "".join(parts)
 
 
-def _crisis_dependence_prose(loyo) -> str:
+def _crisis_dependence_prose(loyo, significance=None) -> str:
     """Report how much of the edge rests on a single year.
 
     This is placed first in the failure analysis because it can invalidate every
@@ -988,7 +988,31 @@ def _crisis_dependence_prose(loyo) -> str:
         )
     lead += "</li>"
 
-    if not np.isnan(se):
+    bs = (significance or {}).get("bootstrap")
+    defl = (significance or {}).get("deflation_train")
+
+    if bs:
+        # Prefer the measured answer over the analytic approximation: the
+        # bootstrap makes no IID assumption and prices the *difference* rather
+        # than a single Sharpe, which is the quantity actually being claimed.
+        item = (
+            f"<li><strong>The full-sample edge is not statistically distinguishable from "
+            f"zero.</strong> A stationary block bootstrap puts the {bs['confidence']:.0%} interval "
+            f"on the {bs['difference']:+.3f} advantage at "
+            f"[{bs['ci_low']:+.3f}, {bs['ci_high']:+.3f}], with p = {bs['p_value']:.3f}."
+        )
+        if defl and not np.isnan(defl.get("deflated_sharpe", np.nan)):
+            item += (
+                f" Correcting for the size of the parameter search as well, the Deflated Sharpe "
+                f"Ratio is {defl['deflated_sharpe']:.3f} against a noise hurdle of "
+                f"{defl['noise_hurdle_sharpe']:.3f} -- short of the conventional 0.95 bar."
+            )
+        item += (
+            " Nothing in this report should be read as establishing that the strategy beats the "
+            "benchmark.</li>"
+        )
+        lead += item
+    elif not np.isnan(se):
         lead += (
             f"<li><strong>The full-sample edge is not statistically distinguishable from zero.</strong> "
             f"The approximate standard error on an annualised Sharpe over this sample length is "
@@ -1003,11 +1027,11 @@ def _crisis_dependence_prose(loyo) -> str:
 
 
 def _failure_prose(f, b, sp, regimes, cost_drag_sharpe, lag_decay, vs_spy, vs_rand,
-                   oos_decay, total_bps, synthetic, loyo=None) -> str:
+                   oos_decay, total_bps, synthetic, loyo=None, significance=None) -> str:
     """The section a recruiter actually reads. Lead with what went wrong."""
     findings: list[str] = []
 
-    crisis = _crisis_dependence_prose(loyo)
+    crisis = _crisis_dependence_prose(loyo, significance)
     if crisis:
         findings.append(crisis)
 
