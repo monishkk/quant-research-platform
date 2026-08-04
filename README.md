@@ -1,4 +1,4 @@
-# Quant Research Platform
+# Cross-Sectional ETF Momentum — Reproducible Research Platform
 
 [![tests](https://github.com/monishkk/quant-research-platform/actions/workflows/tests.yml/badge.svg)](https://github.com/monishkk/quant-research-platform/actions/workflows/tests.yml)
 [![python](https://img.shields.io/badge/python-3.10%20%7C%203.12-blue)](https://www.python.org/)
@@ -6,8 +6,8 @@
 
 **[→ Read the full research report](https://monishkk.github.io/quant-research-platform/)**
 
-A small, tested, reproducible backtesting platform, built to evaluate one strategy properly
-rather than many strategies badly.
+A small, tested backtesting platform, built to evaluate one strategy properly rather than many
+strategies badly — and rigorous enough to conclude that this one does not survive scrutiny.
 
 The test case is **cross-sectional momentum on nine liquid US ETFs**: rank by trailing 12-month
 return (skipping the most recent month), hold the top 3 equally weighted, rebalance monthly,
