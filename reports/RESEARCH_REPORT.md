@@ -74,7 +74,9 @@ In this sample **67 of 227 calendar month-ends (29.5%) are not trading days**, a
 - `returns.loc[t] = prices.loc[t]/prices.loc[t-1] - 1` is the return over `(t-1, t]`, unknowable until t closes.
 - `target_weights.loc[t]` is the portfolio *desired* at the close of t.
 
-The engine holds `executed_weights = target_weights.shift(1)`, so weights multiplying `returns.loc[t]` were fixed at the close of `t-1`. Economically: observe the close, compute overnight, trade the next session.
+The engine holds `executed_weights = target_weights.shift(1)`, so the weights multiplying `returns.loc[t]` were fixed at the close of `t-1`.
+
+**Precisely which return is earned, and what that assumes.** A position formed from the signal at `t-1` earns the close-to-close return from `t-1` to `t`. Earning that return requires already holding the position at the close of `t-1` — so the model assumes a **closing-auction fill on the day the target is set**, not a fill during the following session. That is implementable here rather than optimistic, because the signal is not fresh: with a 21-day skip, the score at `t-1` depends only on prices at or before `t-22`, giving three weeks of notice to work the order. But it is a stronger assumption than "trade the next session", and it is the one the arithmetic actually makes. The T+6 baseline exists to bound what looser execution costs: Sharpe falls from 0.78 to 0.67.
 
 `execution_lag=0` is permitted but warns — it exists so the bias can be *measured*, not shipped.
 
@@ -91,18 +93,32 @@ cost[t]     = turnover[t] * 5 / 10_000
 
 Turnover is **two-way**: rotating out of one 33% position into another counts 0.66, not 0.33. Many published figures quote one-way turnover, exactly half. A factor of two in turnover is a factor of two in costs, so the convention must be checked before any external comparison. Charging the full two-way sum is conservative and matches what a broker bills. The initial entry from cash is charged.
 
+**The 5 bps is per unit of traded notional, not per round trip.** Buying into a position costs 5 bps; selling out of it costs another 5. A complete round trip therefore costs **10 bps**, and a full rotation from one holding to another costs 10 bps (5 to sell, 5 to buy). Earlier drafts of this report described the assumption as "5 bps round-trip", which understated it by half — the code was always right, the label was not. Given that this section exists to argue conventions must be checked before comparison, getting its own label wrong was worth correcting explicitly rather than silently.
+
 Realised annual turnover is **4.33x** (2.16x one-way), costing ~0.22% of NAV per year. Measured against the zero-cost run, costs consumed **0.24%** of annual return and **0.014** of Sharpe.
 
 **Costs are not what kills this strategy** — a useful finding in itself, and the reason the failure analysis focuses elsewhere.
 
 Four ways the model still flatters the result:
 
-1. **No weight drift.** Positions are assumed restored to target each period; real rebalancing trades are slightly larger.
+1. **No weight drift — measured, and it runs the other way.** Between rebalances the engine holds constant weights rather than letting positions drift with relative performance, which implicitly rebalances daily at no cost. Reimplementing the engine with full self-financing drift accounting gives Sharpe **0.775 vs 0.769** and annual turnover **4.47x vs 4.38x**. So the simplification understates turnover by ~2% and *costs* the strategy about 0.006 of Sharpe. It is a real approximation, it is simply not one that flatters the result — for a momentum strategy, letting winners run within the month helps slightly.
 2. **No market impact.** Constant cost per unit of turnover regardless of size. Fine for nine ETFs trading billions daily; wrong at scale.
 3. **Static spread.** A flat slippage number stands in for a spread that widens in exactly the stressed markets where this strategy rebalances hardest.
 4. **No taxes.** At 4.3x turnover in a taxable account, short-term capital gains would be a first-order drag.
+5. **A zero risk-free rate, which does flatter the strategy.** Every Sharpe here is computed against `rf = 0`, and uninvested cash earns nothing. Because the strategy's volatility (14.9%) is below the benchmark's (19.9%), a positive risk-free rate reduces the strategy's Sharpe *more* than the benchmark's:
 
-All four bias the result in the strategy's favour.
+| Risk-free rate | Strategy Sharpe | SPY Sharpe | Edge |
+|---|---|---|---|
+| 0.0% (as reported) | 0.777 | 0.653 | **+0.124** |
+| 1.0% | 0.710 | 0.603 | +0.107 |
+| 2.0% | 0.643 | 0.552 | +0.090 |
+| 3.0% | 0.576 | 0.502 | +0.073 |
+
+Average short-term Treasury yields over 2008–2025 were roughly 1.3%, which puts the honest edge nearer **+0.10 than +0.124**. This does not change the conclusion — it moves it further in the direction the report already argues — but the headline figure is specifically *the excess-Sharpe gap under a zero risk-free rate*, and that assumption is doing about 0.03 of visible work.
+
+6. **The benchmark's entry cost falls outside the reported window.** SPY buy-and-hold is routed through the identical engine and *is* charged its entry, but it enters in January 2007, before the common aligned start of 2008-02-08, so that charge is sliced away and its reported turnover is exactly zero. The strategy's entry is charged inside the window. The asymmetry is worth ~5 bps once across 17.9 years — negligible, and it works against the strategy.
+
+Items 1–4 and 6 are small. Item 5 is the one a reader should keep in mind.
 
 ## 7. Validation procedure
 
@@ -112,7 +128,13 @@ All four bias the result in the strategy's favour.
 | Validation | 2019-01-01 → 2022-12-31 | Inspected after the parameter region was chosen. |
 | Test | 2023-01-01 → 2025-12-30 | Evaluated once. Not used to revise anything. |
 
-The 192-combination sensitivity grid ran on the **training window only**. With that many cells, a Sharpe of 1.5 somewhere in the grid is what noise alone produces. The test split is withheld from the report and console unless `--show-test` is passed.
+The 192-combination sensitivity grid ran on the **training window only**. With that many cells, a Sharpe of 1.5 somewhere in the grid is what noise alone produces.
+
+**On the word "withheld".** The test split is hidden from the report body and console unless `--show-test` is passed — but it is computed on every run and written to `in_vs_out_of_sample.csv`, which is committed to this repository. Anyone can read it, and by now so have I. The defensible claim is therefore not that the numbers were never seen; it is this:
+
+> **Every strategy parameter was fixed before any result was inspected, and none has been changed since.**
+
+That is checkable rather than asserted: `git log -p configs/momentum.yaml` shows the lookback, skip, holdings, rebalance frequency, weight cap, cost assumptions and split boundaries were all set in the initial commit and never touched. Subsequent commits fixed engine and reporting defects — a sensitivity grid that compared different windows, two report tables that silently rendered as "No data.", a mislabelled cost convention — none of which altered a strategy choice. Corrections to measurement after seeing an outcome are legitimate; corrections to the *strategy* would not have been, and did not happen.
 
 Code-level defences against look-ahead live in `tests/test_no_lookahead.py`, which perturbs future prices by 100x and asserts historical signals, weights, and realised returns are bit-identical. That test catches bugs a sample split cannot.
 
@@ -139,6 +161,10 @@ Code-level defences against look-ahead live in `tests/test_no_lookahead.py`, whi
 The strategy **beat SPY on Sharpe and lost on return.** It made less money while taking less risk.
 
 Alpha is +5.47% but the information ratio is **-0.09**. These disagree by construction: Jensen's alpha is beta-adjusted (at beta 0.47 the strategy was only expected to capture ~5.5% of the benchmark's return and delivered 11.03%), while the information ratio uses raw active return and does not adjust for beta at all. Both are correct. Quoting only the alpha would misrepresent the result.
+
+**Alpha with an error bar.** A point estimate invites over-reading, so alpha is reported with a Newey-West standard error (heteroskedasticity- and autocorrelation-robust, which for daily data is the appropriate correction): **t = 2.10, p = 0.035, 95% CI [+0.37%, +10.57%]**.
+
+That is marginally significant, and it deserves the same skepticism this report applies elsewhere rather than a victory lap. It is one test among several run on one sample; the interval very nearly touches zero; the Sharpe *difference* over the same data is not significant at all (p = 0.485); and the raw active return is negative. The consistent reading is that the strategy earned slightly more than its low beta entitled it to, on evidence that clears a 5% threshold by a small margin and would not survive a correction for the number of tests in this report.
 
 **Against random selection.** The strategy beats a seeded random 3-of-9 rotation by 0.34 of Sharpe — the minimum evidence needed to claim the ranking carries information. One caveat: random selection re-draws independently each month and turns over 15.82x/year against the strategy's 4.33x, an extra 0.57% of annual cost. The CAGR gap is 4.36%, so the turnover handicap explains only ~13% of it. The ranking is doing real work relative to random.
 
@@ -274,7 +300,7 @@ The analytic Sharpe standard error for this sample length is ±0.270, but that i
 
 **5. The lookback parameter is unstable.** The 9-month result (0.279) sits well below the 3-month one (0.410) with no monotone structure, which is a warning sign that the formation window is fitting period-specific behaviour.
 
-**6. What did *not* fail:** costs (only 0.014 of Sharpe), execution delay (0.11 at T+6), the ranking versus random selection (+0.34), and the in-sample/out-of-sample edge (stable at +0.08 to +0.16). The strategy's problems are not implementation artefacts — the implementation is sound, and the honest reading of a sound implementation is that the effect is small and crisis-dependent.
+**6. What did *not* fail:** costs (only 0.014 of Sharpe), execution delay (0.11 at T+6), the ranking versus random selection (+0.34), and the in-sample/out-of-sample edge (stable at +0.08 to +0.16). The strategy's problems are not implementation artefacts — the implementation is sound *under the conventions stated in sections 5 and 6*, and the honest reading of a sound implementation is that the effect is small and crisis-dependent.
 
 **Structural weaknesses of the design, independent of this sample:**
 
@@ -312,6 +338,6 @@ The analytic Sharpe standard error for this sample length is ±0.270, but that i
 python -m quant_platform.run --config configs/momentum.yaml
 ```
 
-Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 166 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
+Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 182 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
 
 All numbers in this report are produced by that command. The leave-one-year-out table is `leave_one_year_out.csv`. The 2010-onwards figure is re-derivable from `strategy_timeseries.csv`, which ships both the strategy and the benchmark return series precisely so that sub-period claims can be checked rather than taken on trust.

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 __all__ = [
     "annualized_return",
@@ -278,6 +279,78 @@ def alpha(
     return float((r_ex.mean() - beta_hat * b_ex.mean()) * periods_per_year)
 
 
+def alpha_inference(
+    returns: pd.Series,
+    benchmark: pd.Series,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
+    lags: int | None = None,
+    confidence: float = 0.95,
+) -> dict:
+    """Jensen's alpha with a heteroskedasticity- and autocorrelation-robust t-stat.
+
+    A point estimate of alpha invites the reader to treat it as established. It
+    is a regression intercept with a standard error, and for daily financial
+    data the textbook OLS error is wrong twice over: volatility clusters
+    (heteroskedasticity) and residuals are serially correlated. Newey-West
+    (1987) corrects both, which usually *widens* the interval -- the honest
+    direction.
+
+    Lag length defaults to the Newey-West rule of thumb, ``floor(4(n/100)^(2/9))``.
+
+    Returns alpha annualised, its robust standard error, t-statistic, two-sided
+    p-value and confidence interval. ``t`` and ``p`` are scale-free, so
+    annualising does not distort them.
+    """
+    r, b = _align_pair(returns, benchmark)
+    n = len(r)
+    if n < 10:
+        return {k: np.nan for k in
+                ("alpha", "alpha_se", "alpha_tstat", "alpha_pvalue", "alpha_ci_low",
+                 "alpha_ci_high", "beta", "nw_lags", "n_obs")}
+
+    y = _excess(r, risk_free_rate, periods_per_year).to_numpy(dtype=float)
+    x = _excess(b, risk_free_rate, periods_per_year).to_numpy(dtype=float)
+    X = np.column_stack([np.ones(n), x])
+
+    XtX_inv = np.linalg.pinv(X.T @ X)
+    coef = XtX_inv @ X.T @ y
+    resid = y - X @ coef
+
+    if lags is None:
+        lags = int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    lags = max(0, min(lags, n - 2))
+
+    # Newey-West meat matrix with Bartlett weights.
+    u = X * resid[:, None]
+    S = u.T @ u
+    for lag in range(1, lags + 1):
+        w = 1.0 - lag / (lags + 1.0)
+        G = u[lag:].T @ u[:-lag]
+        S += w * (G + G.T)
+
+    cov = XtX_inv @ S @ XtX_inv
+    se_daily = float(np.sqrt(max(cov[0, 0], 0.0)))
+    a_daily = float(coef[0])
+
+    tstat = a_daily / se_daily if se_daily > 0 else np.nan
+    dof = max(n - 2, 1)
+    pval = float(2.0 * stats.t.sf(abs(tstat), df=dof)) if np.isfinite(tstat) else np.nan
+    crit = float(stats.t.ppf(0.5 + confidence / 2.0, df=dof))
+
+    return {
+        "alpha": a_daily * periods_per_year,
+        "alpha_se": se_daily * periods_per_year,
+        "alpha_tstat": tstat,
+        "alpha_pvalue": pval,
+        "alpha_ci_low": (a_daily - crit * se_daily) * periods_per_year,
+        "alpha_ci_high": (a_daily + crit * se_daily) * periods_per_year,
+        "beta": float(coef[1]),
+        "nw_lags": int(lags),
+        "n_obs": int(n),
+    }
+
+
 def information_ratio(
     returns: pd.Series,
     benchmark: pd.Series,
@@ -413,6 +486,12 @@ def summary_metrics(
         out["beta"] = beta(r, benchmark, risk_free_rate, periods_per_year)
         out["alpha"] = alpha(r, benchmark, risk_free_rate, periods_per_year)
         out["information_ratio"] = information_ratio(r, benchmark, periods_per_year)
+        # Alpha without an error bar is an invitation to over-read it.
+        inf = alpha_inference(r, benchmark, risk_free_rate, periods_per_year)
+        out["alpha_tstat"] = inf["alpha_tstat"]
+        out["alpha_pvalue"] = inf["alpha_pvalue"]
+        out["alpha_ci_low"] = inf["alpha_ci_low"]
+        out["alpha_ci_high"] = inf["alpha_ci_high"]
 
     return pd.Series(out, name=name)
 

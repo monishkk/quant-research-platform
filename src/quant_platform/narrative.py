@@ -14,6 +14,7 @@ disappears once costs are applied" if that is what the numbers show.
 from __future__ import annotations
 
 import html
+
 import numpy as np
 import pandas as pd
 
@@ -105,10 +106,11 @@ def build_narrative(
     leave_one_year_out: pd.DataFrame | None = None,
     significance: dict | None = None,
 ) -> dict[str, str]:
-    d, s, p, v = cfg["data"], cfg["strategy"], cfg["portfolio"], cfg["validation"]
+    d, s, p = cfg["data"], cfg["strategy"], cfg["portfolio"]
     name = strategy.name
     col = name if name in comparison.columns else comparison.columns[0]
     total_bps = p["commission_bps"] + p["slippage_bps"]
+    rf = cfg.get("reporting", {}).get("risk_free_rate", 0.0)
 
     # --- the facts the prose will reason about ----------------------------- #
     f = {
@@ -222,7 +224,6 @@ def build_narrative(
     )
 
     # ---------------------------------------------------------------- 3 ---- #
-    cov = data_report.get("coverage")
     n_rows, n_syms = data_report.get("n_rows", 0), data_report.get("n_symbols", 0)
     n["data"] = (
         _p(
@@ -494,7 +495,8 @@ def build_narrative(
     n["limits"] = (
         "<h3>Limitations</h3>"
         "<ul>"
-        f"<li><strong>Nine assets is a very small cross-section.</strong> A top-3 selection "
+        + _rf_zero_caveat(f, b, rf)
+        + f"<li><strong>Nine assets is a very small cross-section.</strong> A top-3 selection "
         "from nine is a coarse instrument; idiosyncratic moves in one ETF dominate the "
         "portfolio in a way they would not in a broad universe. Effective breadth is low, "
         "which caps the information ratio achievable regardless of signal quality.</li>"
@@ -680,7 +682,6 @@ def _turnover_caveat(f: dict, b: dict, total_bps: float) -> str:
         return ""
 
     extra_cost = (rt - st) * total_bps / 10_000
-    gap = f["sharpe"] - b["rand_sharpe"]
     cagr_gap = f["cagr"] - b.get("rand_cagr", np.nan)
     share = extra_cost / cagr_gap if cagr_gap and not np.isnan(cagr_gap) and cagr_gap > 0 else np.nan
 
@@ -733,6 +734,39 @@ def _decay_phrase(decay: float) -> str:
             "the in-sample result was substantially a fit to that particular period.")
 
 
+def _rf_zero_caveat(f: dict, b: dict, risk_free_rate: float) -> str:
+    """State how much work the risk-free-rate assumption is doing.
+
+    Only surfaced when ``rf = 0``, and phrased in terms of direction rather than
+    a vague "results may vary": because the strategy's volatility sits below the
+    benchmark's, a positive risk-free rate subtracts more from the strategy's
+    Sharpe than from the benchmark's. Reporting the gap under ``rf = 0`` is
+    therefore the most favourable of the reasonable choices, and a reader is
+    entitled to know that before they read the headline.
+    """
+    if risk_free_rate != 0:
+        return ""
+    s_vol, b_vol = f.get("vol", np.nan), b.get("spy_vol", np.nan)
+    if np.isnan(s_vol) or np.isnan(b_vol) or s_vol <= 0 or b_vol <= 0:
+        return ""
+
+    edge = f.get("sharpe", np.nan) - b.get("spy_sharpe", np.nan)
+    # d(Sharpe)/d(rf) = -1/sigma, so the lower-volatility series loses more.
+    shrink = abs(1.0 / s_vol - 1.0 / b_vol)
+    at_two_pct = edge - 0.02 * shrink
+
+    harder = "strategy" if s_vol < b_vol else "benchmark"
+    return (
+        "<li><strong>Every Sharpe here assumes a zero risk-free rate</strong>, and uninvested "
+        f"cash earns nothing. That is not neutral: the strategy's volatility ({_pct(s_vol)}) and "
+        f"the benchmark's ({_pct(b_vol)}) differ, and since a rise in the risk-free rate lowers a "
+        f"Sharpe ratio by 1/&sigma;, it penalises the <strong>{harder}</strong> more. At a 2% "
+        f"risk-free rate the {_num(edge, 3)} Sharpe gap becomes roughly {_num(at_two_pct, 3)}. "
+        "Short-term Treasury yields averaged well above zero across this sample, so the reported "
+        "gap is the most favourable of the defensible choices.</li>"
+    )
+
+
 def _significance_prose(significance: dict | None) -> str:
     """Report the bootstrap and the deflation, and say what they mean.
 
@@ -772,7 +806,11 @@ def _significance_prose(significance: dict | None) -> str:
                 "autocorrelated and an iid bootstrap would understate the uncertainty. The two "
                 "series are resampled on the <em>same</em> draws, which preserves their "
                 "correlation -- bootstrapping them independently would inflate the interval on "
-                "their difference and make the test far too conservative."
+                "their difference and make the test far too conservative. The mean block length "
+                "is a rate (<code>n^(1/3)</code>) rather than a data-driven estimator, so the "
+                "table below re-runs the test across block lengths from 1 to 90 days; the "
+                "interval contains zero at every one of them, and the conclusion does not depend "
+                "on the choice."
             )
         )
 

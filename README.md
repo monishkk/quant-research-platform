@@ -22,8 +22,8 @@ evaluated properly.
 
 ## Headline result
 
-Full sample 2008-02-08 to 2025-12-30, real daily adjusted prices, 5 bps round-trip cost, T+1
-execution:
+Full sample 2008-02-08 to 2025-12-30, real daily adjusted prices, **5 bps per unit of traded
+notional** (so a round trip costs 10 bps), T+1 execution:
 
 | | Momentum (top 3) | SPY buy & hold | Equal weight | Random 3-of-9 |
 |---|---|---|---|---|
@@ -55,8 +55,9 @@ neighbouring cells share most of their trades. But the direction of the result d
 Three further caveats the headline table hides:
 
 - The strategy earned **less money** than SPY (11.03% vs 11.65%) — it won on risk, not return.
-- Alpha is +5.47% but the information ratio is **−0.09**. Both are correct: alpha is
-  beta-adjusted, the information ratio is not.
+- Alpha is +5.47% (Newey–West t = 2.10, p = 0.035) but the information ratio is **−0.09**. Both
+  are correct: alpha is beta-adjusted, the information ratio is not. The alpha clears 5% by a
+  small margin and would not survive a correction for the number of tests here.
 - It beat SPY in only **8 of 18 calendar years**.
 
 What it *is*: a defensive cross-asset rotation. It gives up 6.7%/yr in rising markets (76% of the
@@ -64,8 +65,10 @@ sample) and gains 13.1%/yr in falling ones (21%). That is a coherent economic st
 explains the low beta, the halved drawdown, and the below-index return.
 
 What did **not** fail: costs (0.014 of Sharpe), execution delay (0.11 at T+6), and the ranking
-versus random selection (+0.34). The implementation is sound. The honest reading of a sound
-implementation is that the effect is small and crisis-dependent.
+versus random selection (+0.34). The implementation is sound *under the conventions it states* —
+weight drift, market impact, taxes and a non-zero risk-free rate are all unmodelled, and each is
+listed below. The honest reading of a sound implementation is that the effect is small and
+crisis-dependent.
 
 A negative result, reported as one. Full write-up: [`reports/RESEARCH_REPORT.md`](reports/RESEARCH_REPORT.md)
 (or the generated `reports/momentum/research_report.html`).
@@ -92,7 +95,7 @@ Run the test suite:
 python -m pytest
 ```
 
-166 tests, ~4 seconds. They are the reason to trust anything above.
+182 tests, ~5 seconds. They are the reason to trust anything above.
 
 ---
 
@@ -119,7 +122,7 @@ Useful flags:
 
 | Flag | Effect |
 |---|---|
-| `--show-test` | reveal the withheld test split (use once, when the strategy is final) |
+| `--show-test` | show the test split in the report (it is always computed and written to CSV) |
 | `--no-cache` | force a fresh download instead of reading cached Parquet |
 | `--skip-sensitivity` | skip the 192-combination grid |
 | `--output-dir DIR` | write elsewhere |
@@ -158,11 +161,16 @@ missed rebalance no assertion would catch. This platform resamples the index its
 last **actual** trading day of each period, so rebalance dates are always a subset of the price
 index and the reindex is lossless.
 
-### 3. The test period is withheld by default
+### 3. Parameters were fixed before any result was inspected
 
 The 192-combination sensitivity grid runs on the **training window only**. With that many cells, a
-Sharpe of 1.5 somewhere in the grid is what noise alone produces. The test split is computed once,
-written to CSV, and hidden from both the report and the console unless you pass `--show-test`.
+Sharpe of 1.5 somewhere in the grid is what noise alone produces.
+
+The test split is kept out of the report body unless you pass `--show-test` — but it is computed on
+every run and committed in `in_vs_out_of_sample.csv`, so "withheld" would overstate it. The claim
+that actually matters is checkable: `git log -p configs/momentum.yaml` shows every strategy
+parameter was set in the initial commit and never changed. Later commits fixed engine and reporting
+defects; none altered a strategy choice.
 
 ### 4. Leave-one-year-out, which is what actually found the answer
 

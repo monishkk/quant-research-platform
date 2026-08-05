@@ -38,3 +38,22 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+# Pinned explicitly rather than inheriting ruff's defaults: the default rule set
+# changes between releases, so an unpinned selection means CI can fail on code
+# that has not changed. E/F are correctness, I import order, UP modernisation,
+# B likely bugs.
+select = ["E", "F", "I", "UP", "B"]
+# E501: no auto-formatter is run here, and the lines that exceed 100 are almost
+# all HTML template literals in reporting.py, where wrapping them hurts more
+# than it helps. line-length above still documents the intent.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# run.py defers a few imports into main() to keep module import cheap and to
+# avoid a cycle with narrative.py. That is deliberate, not an oversight.
+"src/quant_platform/run.py" = ["E402"]
+# reporting.py MUST select the matplotlib backend before importing pyplot;
+# hoisting those imports would break headless runs. The ordering is the point.
+"src/quant_platform/reporting.py" = ["E402"]

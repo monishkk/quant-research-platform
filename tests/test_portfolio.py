@@ -99,7 +99,7 @@ def test_cost_monotonic_across_a_ladder(realistic_prices):
         run_backtest(returns, weights, commission_bps=b, slippage_bps=0).equity.iloc[-1]
         for b in (0, 2, 5, 10, 20, 50)
     ]
-    assert all(a >= b for a, b in zip(finals, finals[1:])), f"not monotonic: {finals}"
+    assert all(a >= b for a, b in zip(finals, finals[1:], strict=False)), f"not monotonic: {finals}"
 
 
 def test_costs_equal_turnover_times_rate(realistic_prices):
@@ -309,3 +309,48 @@ def test_engine_rejects_duplicate_dates(realistic_prices):
 def test_cost_model_total_is_additive():
     assert CostModel(2, 3).total_bps == pytest.approx(5.0)
     assert CostModel(0, 0).total_bps == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Missing-return policy
+# --------------------------------------------------------------------------- #
+def _panel_with_a_hole():
+    idx = pd.bdate_range("2020-01-01", periods=12)
+    returns = pd.DataFrame(0.001, index=idx, columns=["AAA", "BBB"])
+    returns.iloc[6, 0] = np.nan            # AAA has no return on day 6
+    weights = pd.DataFrame(0.5, index=idx, columns=["AAA", "BBB"])
+    return returns, weights
+
+
+def test_missing_return_on_a_held_asset_raises_by_default():
+    """A missing return is not a flat day, and must not be silently treated as one."""
+    returns, weights = _panel_with_a_hole()
+    with pytest.raises(ValueError, match="missing return"):
+        run_backtest(returns, weights, 1000.0, 0.0, 0.0)
+
+
+def test_missing_return_can_be_treated_as_flat_when_asked_explicitly():
+    returns, weights = _panel_with_a_hole()
+    with pytest.warns(UserWarning, match="treated as 0.0"):
+        res = run_backtest(returns, weights, 1000.0, 0.0, 0.0, on_missing="zero")
+    assert np.isfinite(res.net_returns).all()
+
+
+def test_missing_return_check_can_be_disabled():
+    returns, weights = _panel_with_a_hole()
+    res = run_backtest(returns, weights, 1000.0, 0.0, 0.0, on_missing="ignore")
+    assert np.isfinite(res.net_returns).all()
+
+
+def test_missing_policy_rejects_unknown_values():
+    returns, weights = _panel_with_a_hole()
+    with pytest.raises(ValueError, match="on_missing must be"):
+        run_backtest(returns, weights, 1000.0, 0.0, 0.0, on_missing="nonsense")
+
+
+def test_clean_panel_is_unaffected_by_the_default_policy(growing_prices):
+    """The strict default must not disturb runs that have nothing missing."""
+    returns = simple_returns(growing_prices)
+    weights = pd.DataFrame(1.0 / returns.shape[1], index=returns.index, columns=returns.columns)
+    res = run_backtest(returns, weights, 1000.0, 0.0, 0.0)
+    assert len(res.net_returns) > 0

@@ -32,6 +32,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install ruff
+
+      # pyproject already carries a [tool.ruff] section; before this step it was
+      # configuration that nothing enforced, which is worse than no config at all
+      # because it implies a standard the repository does not actually meet.
+      - name: Lint
+        run: ruff check src tests
 
       - name: Run tests
         run: pytest -q

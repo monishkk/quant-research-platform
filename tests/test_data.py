@@ -270,3 +270,81 @@ def test_parquet_roundtrip_preserves_dtypes(tmp_path, panel):
     panel.to_parquet(path, index=False)
     reloaded = standardise(pd.read_parquet(path))
     pd.testing.assert_frame_equal(panel, reloaded)
+
+
+# --------------------------------------------------------------------------- #
+# Cache integrity
+# --------------------------------------------------------------------------- #
+def test_cached_panel_without_provenance_is_refused(tmp_path):
+    """A panel whose origin cannot be confirmed must not be handed back.
+
+    Losing the sidecar is exactly the state in which synthetic data becomes
+    indistinguishable from real data, so it fails loudly instead.
+    """
+    load_prices(SYMBOLS, "2015-01-01", "2016-12-31",
+                source="synthetic", data_dir=tmp_path, seed=5)
+    for meta in (tmp_path / "processed").glob("*.meta.json"):
+        meta.unlink()
+
+    with pytest.raises(FileNotFoundError, match="no provenance record"):
+        load_prices(SYMBOLS, "2015-01-01", "2016-12-31",
+                    source="synthetic", data_dir=tmp_path, seed=5)
+
+
+def test_cache_refuses_to_serve_one_source_as_another(tmp_path):
+    """Synthetic prices must never satisfy a request for real ones.
+
+    This reproduces the contamination path directly: a synthetic panel is moved
+    into the slot a yfinance request would look in. Without the guard it would
+    load silently and every downstream number would describe simulated data.
+    """
+    load_prices(SYMBOLS, "2015-01-01", "2016-12-31",
+                source="synthetic", data_dir=tmp_path, seed=5)
+    proc = tmp_path / "processed"
+    for path in list(proc.iterdir()):
+        path.rename(proc / path.name.replace("synthetic_", "yfinance_", 1))
+
+    with pytest.raises(ValueError, match="was produced by source"):
+        load_prices(SYMBOLS, "2015-01-01", "2016-12-31",
+                    source="yfinance", data_dir=tmp_path, use_cache=True)
+
+
+def test_fallback_panel_is_stored_under_the_source_it_came_from(tmp_path):
+    """A fallback must not occupy the real provider's cache slot."""
+    from quant_platform import data as data_mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("network down")
+
+    original = data_mod.download_prices
+    data_mod.download_prices = boom
+    try:
+        data_mod.load_prices(SYMBOLS, "2015-01-01", "2016-12-31", source="yfinance",
+                             data_dir=tmp_path, allow_synthetic_fallback=True, seed=5)
+    finally:
+        data_mod.download_prices = original
+
+    written = {p.name.split("_")[0] for p in (tmp_path / "processed").glob("*.parquet")}
+    assert written == {"synthetic"}, f"fallback poisoned the yfinance slot: {written}"
+
+
+def test_provenance_records_code_and_data_identity(tmp_path):
+    """A result is traceable only if both the code and the data are pinned."""
+    load_prices(SYMBOLS, "2015-01-01", "2016-12-31",
+                source="synthetic", data_dir=tmp_path, seed=5)
+    meta = next((tmp_path / "processed").glob("*.meta.json"))
+    prov = DataProvenance.from_json(meta)
+    assert len(prov.data_sha256) == 64
+    assert prov.git_commit == "" or len(prov.git_commit) == 40
+
+
+def test_checksum_detects_a_changed_price(tmp_path):
+    from quant_platform.data import panel_checksum
+
+    long = load_prices(SYMBOLS, "2015-01-01", "2016-12-31", source="synthetic",
+                       data_dir=tmp_path, seed=5, wide=False)
+    before = panel_checksum(long)
+    tweaked = long.copy()
+    tweaked.loc[tweaked.index[10], "adjusted_close"] *= 1.0001
+    assert panel_checksum(tweaked) != before
+    assert panel_checksum(long.sample(frac=1.0, random_state=0)) == before  # order-independent

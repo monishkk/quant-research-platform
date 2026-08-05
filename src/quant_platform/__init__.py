@@ -18,29 +18,29 @@ moment a decision is made; see ``portfolio.run_backtest`` and
 
 __version__ = "0.1.0"
 
+from quant_platform import metrics, reporting, validation
+from quant_platform.costs import CostModel
 from quant_platform.data import (
-    load_prices,
     download_prices,
-    validate_price_panel,
-    to_wide,
+    load_prices,
     to_long,
+    to_wide,
+    validate_price_panel,
 )
+from quant_platform.portfolio import BacktestResult, run_backtest
 from quant_platform.returns import (
-    simple_returns,
-    log_returns,
     cumulative_returns,
+    log_returns,
     rolling_volatility,
+    simple_returns,
 )
 from quant_platform.signals import (
-    trailing_momentum,
-    top_n_equal_weight,
     apply_max_weight,
-    rebalance_dates,
     build_target_weights,
+    rebalance_dates,
+    top_n_equal_weight,
+    trailing_momentum,
 )
-from quant_platform.costs import CostModel
-from quant_platform.portfolio import run_backtest, BacktestResult
-from quant_platform import metrics, validation, reporting
 
 __all__ = [
     "__version__",

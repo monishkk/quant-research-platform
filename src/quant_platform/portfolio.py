@@ -50,7 +50,6 @@ import logging
 import warnings
 from dataclasses import dataclass, field
 
-import numpy as np
 import pandas as pd
 
 from quant_platform.costs import CostModel, compute_turnover
@@ -83,7 +82,7 @@ class BacktestResult:
     def index(self) -> pd.DatetimeIndex:
         return self.equity.index
 
-    def slice(self, start=None, end=None) -> "BacktestResult":
+    def slice(self, start=None, end=None) -> BacktestResult:
         """Restrict every series to a date window, re-basing equity to 1.0 x capital.
 
         Used for in-sample / out-of-sample reporting: the sub-period equity curve
@@ -141,6 +140,7 @@ def run_backtest(
     slippage_bps: float = 3.0,
     execution_lag: int = 1,
     cash_rate: float = 0.0,
+    on_missing: str = "raise",
     periods_per_year: int = 252,
     name: str = "strategy",
     warmup_trim: bool = True,
@@ -195,7 +195,7 @@ def run_backtest(
             weights = weights[keep]
             executed_weights = executed_weights[keep]
 
-    _check_returns_available(executed_weights, asset_returns)
+    _check_returns_available(executed_weights, asset_returns, on_missing)
 
     # ---- stage: executed position -> portfolio return -------------------- #
     exposure = executed_weights.sum(axis=1)
@@ -278,23 +278,46 @@ def _align(
     )
 
 
-def _check_returns_available(executed_weights: pd.DataFrame, asset_returns: pd.DataFrame) -> None:
-    """Warn if capital was allocated to an asset whose return is missing.
+def _check_returns_available(
+    executed_weights: pd.DataFrame, asset_returns: pd.DataFrame, on_missing: str = "raise"
+) -> None:
+    """Decide what to do when capital sits in an asset with no return.
 
-    Silently treating a missing return as flat would understate risk; the run is
-    allowed to continue but the contamination is surfaced rather than buried.
+    A missing return is not the same thing as a flat day. Treating it as zero
+    understates risk and quietly invents a price for an asset that may have been
+    halted, delisted, or simply absent from the vendor's file -- and the
+    resulting equity curve looks entirely normal, which is what makes it
+    dangerous.
+
+    The default is therefore to **raise**. ``on_missing="zero"`` restores the
+    older behaviour (warn, then treat as flat) for callers who have looked at
+    the gap and decided it is benign; ``"ignore"`` suppresses the check
+    entirely. There is no correct universal policy here, so the choice is made
+    explicit rather than buried in a fillna.
     """
+    if on_missing not in {"raise", "zero", "ignore"}:
+        raise ValueError(f"on_missing must be 'raise', 'zero' or 'ignore', got {on_missing!r}")
+    if on_missing == "ignore":
+        return
+
     held = executed_weights.abs() > 1e-12
     missing = held & asset_returns.isna()
     n = int(missing.to_numpy().sum())
-    if n:
-        first = asset_returns.index[missing.any(axis=1)][0]
-        warnings.warn(
-            f"{n} periods hold a non-zero weight in an asset with a missing return "
-            f"(first at {first.date()}); those returns are treated as 0.0.",
-            UserWarning,
-            stacklevel=3,
+    if not n:
+        return
+
+    first = asset_returns.index[missing.any(axis=1)][0]
+    symbols = sorted(missing.columns[missing.any(axis=0)])
+    detail = (
+        f"{n} periods hold a non-zero weight in an asset with a missing return "
+        f"(first at {first.date()}; symbols: {', '.join(symbols)})"
+    )
+    if on_missing == "raise":
+        raise ValueError(
+            detail + ". Refusing to treat a missing return as flat -- clean the panel, "
+            "or pass on_missing='zero' if the gap is known to be benign."
         )
+    warnings.warn(detail + "; those returns are treated as 0.0.", UserWarning, stacklevel=3)
 
 
 def buy_and_hold(

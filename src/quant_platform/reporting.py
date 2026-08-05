@@ -458,7 +458,7 @@ def plot_split_bars(
     axes = np.atleast_1d(axes)
     colors = [PALETTE["strategy"], PALETTE["accent"], PALETTE["warn"]]
 
-    for ax, row in zip(axes, rows):
+    for ax, row in zip(axes, rows, strict=False):
         if row not in split_metrics.index:
             continue
         vals = [float(split_metrics.loc[row, c]) for c in cols]
@@ -467,7 +467,7 @@ def plot_split_bars(
         ax.set_title(row.replace("_", " "), fontsize=11, fontweight="bold")
         ax.axhline(0, color=PALETTE["text"], linewidth=0.8)
         ax.grid(axis="x", visible=False)
-        for bar, v in zip(bars, vals):
+        for bar, v in zip(bars, vals, strict=True):
             ax.annotate(
                 f"{v * scale:.2f}" + ("%" if scale == 100 else ""),
                 (bar.get_x() + bar.get_width() / 2, bar.get_height()),
@@ -572,15 +572,16 @@ def _table(df: pd.DataFrame, float_fmt: str = "{:.3f}", pct_rows=()) -> str:
     body = "".join(
         "<tr><td>" + html.escape(str(idx)).replace("_", " ") + "</td>"
         + "".join(f"<td>{fmt(v)}</td>" for v in row) + "</tr>"
-        for idx, row in zip(out.index, out.values)
+        for idx, row in zip(out.index, out.values, strict=True)
     )
     return f'<div class="scroll"><table><thead><tr><th></th>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
 def _kpis(pairs: list[tuple[str, str]]) -> str:
     cells = "".join(
-        f'<div class="kpi"><div class="l">{html.escape(l)}</div><div class="v">{html.escape(v)}</div></div>'
-        for l, v in pairs
+        f'<div class="kpi"><div class="l">{html.escape(label)}</div>'
+        f'<div class="v">{html.escape(v)}</div></div>'
+        for label, v in pairs
     )
     return f'<div class="kpis">{cells}</div>'
 

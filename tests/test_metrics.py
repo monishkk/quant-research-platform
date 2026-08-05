@@ -317,3 +317,75 @@ def test_empty_input_returns_nan_not_exception():
     assert np.isnan(metrics.annualized_sharpe(empty))
     assert np.isnan(metrics.annualized_return(empty))
     assert np.isnan(metrics.win_rate(empty))
+
+
+# --------------------------------------------------------------------------- #
+# Alpha inference (Newey-West)
+# --------------------------------------------------------------------------- #
+def _paired(alpha_daily: float, beta: float, n: int = 1200, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2015-01-01", periods=n)
+    bench = pd.Series(rng.normal(0.0004, 0.01, n), index=idx)
+    noise = pd.Series(rng.normal(0.0, 0.004, n), index=idx)
+    return pd.Series(alpha_daily + beta * bench + noise, index=idx), bench
+
+
+def test_alpha_inference_recovers_a_known_intercept_and_slope():
+    """Check calibration, not an arbitrary tolerance.
+
+    The intercept of a 1,200-day regression carries real sampling error -- here
+    about 0.03 annualised -- so demanding the point estimate land within some
+    fixed percentage of the truth tests the luck of the seed rather than the
+    estimator. The statistically meaningful claims are that the reported
+    interval covers the true value and that the estimate sits within a few of
+    its own standard errors.
+    """
+    strat, bench = _paired(alpha_daily=0.0003, beta=0.5)
+    out = metrics.alpha_inference(strat, bench)
+    true_alpha = 0.0003 * 252
+
+    assert out["beta"] == pytest.approx(0.5, abs=0.03)
+    assert out["alpha_ci_low"] < true_alpha < out["alpha_ci_high"]
+    assert out["alpha"] == pytest.approx(true_alpha, abs=3 * out["alpha_se"])
+    assert out["alpha_ci_low"] < out["alpha"] < out["alpha_ci_high"]
+
+
+def test_zero_alpha_is_not_significant():
+    strat, bench = _paired(alpha_daily=0.0, beta=1.0, seed=3)
+    out = metrics.alpha_inference(strat, bench)
+    assert abs(out["alpha_tstat"]) < 2.0
+    assert out["alpha_pvalue"] > 0.05
+    assert out["alpha_ci_low"] < 0 < out["alpha_ci_high"]
+
+
+def test_large_alpha_is_significant():
+    strat, bench = _paired(alpha_daily=0.0008, beta=1.0, seed=4)
+    out = metrics.alpha_inference(strat, bench)
+    assert out["alpha_tstat"] > 3.0
+    assert out["alpha_pvalue"] < 0.01
+    assert out["alpha_ci_low"] > 0
+
+
+def test_alpha_point_estimate_matches_the_standalone_function():
+    """The inference path must not quietly disagree with metrics.alpha."""
+    strat, bench = _paired(alpha_daily=0.0002, beta=0.8, seed=5)
+    assert metrics.alpha_inference(strat, bench)["alpha"] == pytest.approx(
+        metrics.alpha(strat, bench), rel=1e-6
+    )
+
+
+def test_newey_west_widens_the_error_under_autocorrelation():
+    """The entire point of the HAC correction: serial dependence costs precision."""
+    strat, bench = _paired(alpha_daily=0.0002, beta=1.0, seed=6)
+    strat = strat.rolling(5).mean().dropna()          # induce strong autocorrelation
+    bench = bench.reindex(strat.index)
+    naive = metrics.alpha_inference(strat, bench, lags=0)["alpha_se"]
+    robust = metrics.alpha_inference(strat, bench)["alpha_se"]
+    assert robust > naive
+
+
+def test_alpha_uncertainty_reaches_the_summary_table():
+    strat, bench = _paired(alpha_daily=0.0002, beta=1.0, seed=7)
+    s = metrics.summary_metrics(strat, benchmark=bench)
+    for field in ("alpha_tstat", "alpha_pvalue", "alpha_ci_low", "alpha_ci_high"):
+        assert field in s.index and np.isfinite(float(s[field]))

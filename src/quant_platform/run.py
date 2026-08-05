@@ -16,7 +16,6 @@ import argparse
 import logging
 import platform
 import sys
-import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +24,7 @@ import pandas as pd
 import yaml
 
 from quant_platform import __version__, metrics, reporting, validation
-from quant_platform.data import load_prices, read_provenance, validate_price_panel
+from quant_platform.data import load_prices_with_provenance, validate_price_panel
 from quant_platform.portfolio import run_backtest
 from quant_platform.returns import simple_returns
 from quant_platform.signals import build_target_weights
@@ -64,7 +63,9 @@ def load_config(path: str | Path) -> dict:
     cfg["reporting"].setdefault("periods_per_year", 252)
     cfg["data"].setdefault("benchmark", "SPY")
     cfg["data"].setdefault("source", "yfinance")
-    cfg["data"].setdefault("allow_synthetic_fallback", True)
+    # Default off: a config that omits the key should fail on a dead data source
+    # rather than silently substituting simulated prices.
+    cfg["data"].setdefault("allow_synthetic_fallback", False)
     cfg.setdefault("seed", 42)
     return cfg
 
@@ -117,18 +118,21 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("quant_platform %s  |  config: %s", __version__, args.config)
     logger.info("=" * 68)
 
-    long = load_prices(
+    # Provenance comes back from the same call that produced the data, so the
+    # two cannot disagree. Looking the sidecar up separately by cache key could
+    # silently return None, and a report with missing provenance is
+    # indistinguishable from one with clean provenance.
+    long, provenance = load_prices_with_provenance(
         symbols=d["symbols"],
         start=d["start"],
         end=d["end"],
         source=d["source"],
         use_cache=not args.no_cache,
-        allow_synthetic_fallback=d["allow_synthetic_fallback"],
+        allow_synthetic_fallback=d.get("allow_synthetic_fallback", False),
         seed=cfg["seed"],
         wide=False,
     )
     report = validate_price_panel(long, raise_on_error=True)
-    provenance = read_provenance(d["symbols"], d["start"], d["end"], d["source"])
 
     if provenance is not None and provenance.source == "synthetic":
         run_warnings.append(
@@ -164,8 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         rebalance=s["rebalance"],
         max_weight=s.get("max_weight"),
     )
-    assert (target_weights.abs().sum(axis=1) <= 1.000001).all(), "weights exceed 100% of capital"
-    assert (target_weights >= -1e-12).all().all(), "long-only strategy produced a negative weight"
+    # Explicit raises, not asserts: these are the constraints the strategy is
+    # claimed to satisfy, and `python -O` strips assert statements entirely.
+    # A guarantee that disappears under a common interpreter flag is not one.
+    if not (target_weights.abs().sum(axis=1) <= 1.000001).all():
+        worst = target_weights.abs().sum(axis=1).max()
+        raise ValueError(f"weights exceed 100% of capital (max gross exposure {worst:.6f})")
+    if not (target_weights >= -1e-12).all().all():
+        raise ValueError("long-only strategy produced a negative weight")
 
     # ---- 3. Backtest ------------------------------------------------------ #
     strategy = run_backtest(
@@ -176,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         slippage_bps=p["slippage_bps"],
         execution_lag=p["execution_lag"],
         periods_per_year=ppy,
-        name="Momentum (top %d)" % s["holdings"],
+        name=f"Momentum (top {s['holdings']})",
     )
     logger.info("Strategy: %r", strategy)
 
@@ -275,7 +285,6 @@ def main(argv: list[str] | None = None) -> int:
     # ---- 7. Figures ------------------------------------------------------- #
     logger.info("Rendering figures -> %s", out_dir)
     equity_curves = {name: r.equity for name, r in all_results.items()}
-    return_series = {name: r.net_returns for name, r in all_results.items()}
     headline = {strategy.name: strategy.net_returns, "SPY buy & hold": benchmark_returns}
 
     figures = {
@@ -332,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     ).to_csv(out_dir / "strategy_timeseries.csv")
 
     # ---- 9. Report -------------------------------------------------------- #
-    from quant_platform.narrative import build_narrative, build_kpis
+    from quant_platform.narrative import build_kpis, build_narrative
 
     narrative = build_narrative(
         cfg, report, provenance, comparison, split_metrics, bench_splits,
@@ -422,6 +431,19 @@ def _run_significance(
         add("p_value", round(bs["p_value"], 6), "two-sided, null of no difference")
         add("block_length_days", bs["block_length"], "mean geometric block length")
         add("n_resamples", bs["n_boot"])
+        # The default block length is a rate (n^(1/3)), not a data-driven
+        # estimator, so the honest thing is to show the conclusion does not
+        # depend on it rather than to assert that it does not.
+        for L in (1, 5, 10, 25, 40, 60, 90):
+            alt = sig.bootstrap_sharpe_difference(
+                strategy_returns, benchmark_returns, n_boot=max(1000, n_boot // 5),
+                block_length=L, confidence=confidence,
+                periods_per_year=periods_per_year, risk_free_rate=risk_free_rate, seed=seed,
+            )
+            rows.append({
+                "metric": f"p_value_block_{L}", "value": round(alt["p_value"], 6),
+                "note": f"block-length robustness; CI [{alt['ci_low']:+.3f}, {alt['ci_high']:+.3f}]",
+            })
     except (ValueError, KeyError) as exc:
         logger.warning("Bootstrap skipped: %s", exc)
 

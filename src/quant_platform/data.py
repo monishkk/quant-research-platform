@@ -35,12 +35,14 @@ actions -- do not reuse this module for that without fixing those first.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import dataclass, asdict
+import subprocess
+from collections.abc import Iterable, Sequence
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -78,15 +80,57 @@ class DataProvenance:
     first_date: str
     last_date: str
     note: str = ""
+    # Identity of the code and of the data itself. A result is only traceable if
+    # you can pin down *both*: the same script against revised prices, or revised
+    # code against the same prices, are different experiments.
+    git_commit: str = ""
+    data_sha256: str = ""
 
     def to_json(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
     @classmethod
-    def from_json(cls, path: Path) -> "DataProvenance":
+    def from_json(cls, path: Path) -> DataProvenance:
         raw = json.loads(path.read_text(encoding="utf-8"))
         raw["symbols"] = tuple(raw["symbols"])
+        # Tolerate records written before these fields existed.
+        raw.setdefault("git_commit", "")
+        raw.setdefault("data_sha256", "")
         return cls(**raw)
+
+
+def current_git_commit() -> str:
+    """The repository's HEAD, or ``""`` outside a checkout.
+
+    Recorded rather than assumed: 'reproducible' means nothing if the reader
+    cannot tell which version of the code produced a number.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=Path(__file__).resolve().parent,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - environment dependent
+        return ""
+
+
+def panel_checksum(long: pd.DataFrame) -> str:
+    """Content hash of a canonical long panel.
+
+    Deliberately computed on sorted values rather than on the file bytes:
+    Parquet encoding can differ run to run, but the *data* either changed or it
+    did not. Yahoo back-adjusts its close series whenever a dividend is paid, so
+    a silently revised history is a real possibility this makes detectable.
+    """
+    ordered = long.sort_values(["symbol", "date"]).reset_index(drop=True)
+    numeric = ordered.select_dtypes("number").round(10).to_numpy(dtype="float64")
+    h = hashlib.sha256()
+    h.update(numeric.tobytes())
+    h.update("|".join(ordered["symbol"].astype(str)).encode("utf-8"))
+    h.update(ordered["date"].astype("int64").to_numpy().tobytes())
+    return h.hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -359,10 +403,19 @@ def to_long(wide: pd.DataFrame, field: str = "adjusted_close") -> pd.DataFrame:
 
 
 def _assert_wide_invariants(wide: pd.DataFrame) -> None:
-    """The three invariants every downstream function is allowed to assume."""
-    assert wide.index.is_monotonic_increasing, "price index is not sorted ascending"
-    assert not wide.index.duplicated().any(), "price index contains duplicate dates"
-    assert wide.columns.is_unique, "price columns contain duplicate symbols"
+    """The three invariants every downstream function is allowed to assume.
+
+    Raised rather than asserted: the whole platform relies on these holding, and
+    `python -O` removes assert statements. A guarantee that evaporates under an
+    optimisation flag is worse than no guarantee, because it is still advertised.
+    """
+    if not wide.index.is_monotonic_increasing:
+        raise ValueError("price index is not sorted ascending")
+    if wide.index.duplicated().any():
+        dupes = wide.index[wide.index.duplicated()].unique()[:3]
+        raise ValueError(f"price index contains duplicate dates (e.g. {list(dupes)})")
+    if not wide.columns.is_unique:
+        raise ValueError("price columns contain duplicate symbols")
 
 
 # --------------------------------------------------------------------------- #
@@ -381,12 +434,16 @@ def load_prices(
     source: str = "yfinance",
     data_dir: str | Path = "data",
     use_cache: bool = True,
-    allow_synthetic_fallback: bool = True,
+    allow_synthetic_fallback: bool = False,
     seed: int = 42,
     wide: bool = True,
     field: str = "adjusted_close",
 ) -> pd.DataFrame:
     """Load prices, downloading and caching to Parquet on first use.
+
+    ``allow_synthetic_fallback`` defaults to **False**: a research pipeline
+    should fail loudly when its data source is unavailable rather than quietly
+    substituting simulated prices. Enable it only for smoke tests.
 
     Parameters
     ----------
@@ -403,6 +460,33 @@ def load_prices(
             not prices.index.duplicated().any()
             prices.columns.is_unique
     """
+    return load_prices_with_provenance(
+        symbols, start, end, source=source, data_dir=data_dir, use_cache=use_cache,
+        allow_synthetic_fallback=allow_synthetic_fallback, seed=seed, wide=wide, field=field,
+    )[0]
+
+
+def load_prices_with_provenance(
+    symbols: Sequence[str],
+    start: str = "2007-01-01",
+    end: str = "2025-12-31",
+    *,
+    source: str = "yfinance",
+    data_dir: str | Path = "data",
+    use_cache: bool = True,
+    allow_synthetic_fallback: bool = False,
+    seed: int = 42,
+    wide: bool = True,
+    field: str = "adjusted_close",
+) -> tuple[pd.DataFrame, DataProvenance]:
+    """As :func:`load_prices`, but also returns the provenance of what was loaded.
+
+    Callers that report results should use this rather than looking the sidecar
+    up separately by cache key. Deriving provenance from the same call that
+    produced the data makes it impossible for the two to disagree -- a separate
+    lookup can silently return ``None``, and a report with no provenance looks
+    identical to a report with clean provenance.
+    """
     data_dir = Path(data_dir)
     raw_dir, proc_dir = data_dir / "raw", data_dir / "processed"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -414,20 +498,28 @@ def load_prices(
 
     if use_cache and processed_path.exists():
         logger.info("Loading cached panel: %s", processed_path)
-        long = pd.read_parquet(processed_path)
-        long = standardise(long)
+        long = standardise(pd.read_parquet(processed_path))
+        prov = _verify_cached_provenance(meta_path, processed_path, source, long)
     else:
         long, actual_source, note = _fetch(
             symbols, start, end, source, allow_synthetic_fallback, seed
         )
         validate_price_panel(long, raise_on_error=True)
 
-        # Raw snapshot first (never overwritten by cleaning), then processed.
+        # A fallback panel is stored under the source it ACTUALLY came from, so
+        # it can never occupy the slot the real provider is expected to fill. A
+        # later run asking for yfinance will find nothing and re-download rather
+        # than silently inheriting simulated prices.
+        write_key = _cache_key(symbols, start, end, actual_source)
+        processed_path = proc_dir / f"{write_key}.parquet"
+        meta_path = proc_dir / f"{write_key}.meta.json"
+
+        # Timestamped, never-overwritten snapshot of exactly what was ingested.
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        long.to_parquet(raw_dir / f"{key}_{stamp}.parquet", index=False)
+        long.to_parquet(raw_dir / f"{write_key}_{stamp}.parquet", index=False)
         long.to_parquet(processed_path, index=False)
 
-        DataProvenance(
+        prov = DataProvenance(
             source=actual_source,
             symbols=tuple(s.upper() for s in symbols),
             start=start,
@@ -437,10 +529,53 @@ def load_prices(
             first_date=str(long["date"].min().date()),
             last_date=str(long["date"].max().date()),
             note=note,
-        ).to_json(meta_path)
+            git_commit=current_git_commit(),
+            data_sha256=panel_checksum(long),
+        )
+        prov.to_json(meta_path)
         logger.info("Wrote %s (%d rows) and provenance %s", processed_path, len(long), meta_path)
 
-    return to_wide(long, field=field) if wide else long
+    return (to_wide(long, field=field) if wide else long), prov
+
+
+def _verify_cached_provenance(
+    meta_path: Path, processed_path: Path, requested_source: str, long: pd.DataFrame
+) -> DataProvenance:
+    """Refuse to hand back cached data whose origin cannot be confirmed.
+
+    The failure this prevents: a download fails, synthetic prices are generated
+    as a fallback, and every subsequent run quietly trains on simulated data
+    while the report says "yfinance". Cheap to prevent, and impossible to notice
+    afterwards from the numbers alone -- synthetic momentum panels look
+    perfectly plausible.
+    """
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Cached panel {processed_path} has no provenance record at {meta_path}. "
+            "Its origin cannot be verified; delete the cached file and re-download, "
+            "or pass use_cache=False."
+        )
+
+    prov = DataProvenance.from_json(meta_path)
+    if prov.source != requested_source:
+        raise ValueError(
+            f"Cached panel at {processed_path} was produced by source "
+            f"{prov.source!r}, but {requested_source!r} was requested. "
+            "Refusing to substitute one for the other."
+        )
+    if prov.source == "synthetic":
+        logger.warning(
+            "Loaded SYNTHETIC prices from cache -- results describe a simulated "
+            "panel and carry no information about real markets."
+        )
+
+    digest = panel_checksum(long)
+    if prov.data_sha256 and digest != prov.data_sha256:
+        logger.warning(
+            "Cached panel checksum %s does not match the recorded %s; the file has "
+            "changed since it was written.", digest[:12], prov.data_sha256[:12],
+        )
+    return prov
 
 
 def _fetch(
