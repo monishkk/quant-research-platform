@@ -312,6 +312,6 @@ The analytic Sharpe standard error for this sample length is ±0.270, but that i
 python -m quant_platform.run --config configs/momentum.yaml
 ```
 
-Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 165 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
+Regenerates every figure, table, and CSV in `reports/momentum/`. The configuration file is the complete description of the run. 166 tests (`python -m pytest`) cover the engine accounting, every metric against an analytically known answer, look-ahead perturbation tests, and end-to-end determinism.
 
 All numbers in this report are produced by that command. The leave-one-year-out table is `leave_one_year_out.csv`. The 2010-onwards figure is re-derivable from `strategy_timeseries.csv`, which ships both the strategy and the benchmark return series precisely so that sub-period claims can be checked rather than taken on trust.

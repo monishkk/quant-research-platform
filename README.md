@@ -92,7 +92,7 @@ Run the test suite:
 python -m pytest
 ```
 
-165 tests, ~4 seconds. They are the reason to trust anything above.
+166 tests, ~4 seconds. They are the reason to trust anything above.
 
 ---
 
