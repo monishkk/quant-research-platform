@@ -348,3 +348,26 @@ def test_checksum_detects_a_changed_price(tmp_path):
     tweaked.loc[tweaked.index[10], "adjusted_close"] *= 1.0001
     assert panel_checksum(tweaked) != before
     assert panel_checksum(long.sample(frac=1.0, random_state=0)) == before  # order-independent
+
+
+def test_read_provenance_reports_what_is_cached(tmp_path):
+    """The read-only inspection path must agree with what was actually written.
+
+    ``read_provenance`` exists so a cache can be inspected without loading tens
+    of thousands of rows. It is deliberately NOT how the pipeline obtains
+    provenance for reporting -- looking the sidecar up by key can silently
+    return None, which is why ``load_prices_with_provenance`` exists and is what
+    ``run.py`` uses.
+    """
+    from quant_platform.data import load_prices_with_provenance, read_provenance
+
+    assert read_provenance(SYMBOLS, "2015-01-01", "2016-12-31",
+                           source="synthetic", data_dir=tmp_path) is None
+
+    _, written = load_prices_with_provenance(
+        SYMBOLS, "2015-01-01", "2016-12-31",
+        source="synthetic", data_dir=tmp_path, seed=5,
+    )
+    found = read_provenance(SYMBOLS, "2015-01-01", "2016-12-31",
+                            source="synthetic", data_dir=tmp_path)
+    assert found == written

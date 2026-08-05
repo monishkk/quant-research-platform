@@ -95,7 +95,7 @@ Run the test suite:
 python -m pytest
 ```
 
-182 tests, ~5 seconds. They are the reason to trust anything above.
+183 tests, ~5 seconds. They are the reason to trust anything above.
 
 ---
 
@@ -197,6 +197,7 @@ src/quant_platform/
 ├── costs.py        turnover definition and the linear cost model
 ├── portfolio.py    the engine: execution lag, costs, equity curve
 ├── metrics.py      every performance statistic, implemented from its definition
+├── significance.py stationary block bootstrap, Probabilistic and Deflated Sharpe
 ├── validation.py   sample splits, baselines, sensitivity grid, regime analysis
 ├── reporting.py    matplotlib figures and the HTML report
 ├── narrative.py    the report's prose, with conclusions computed from the results
@@ -207,6 +208,7 @@ tests/
 ├── test_portfolio.py      engine accounting, costs, weights, reproducibility
 ├── test_metrics.py        every metric against an analytically known answer
 ├── test_no_lookahead.py   perturbation tests for causality
+├── test_significance.py   bootstrap construction, deflation, known-answer inference
 └── test_validation.py     splits, baselines, sensitivity, end-to-end determinism
 
 notebooks/
