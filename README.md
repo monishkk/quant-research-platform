@@ -232,10 +232,10 @@ through undocumented convention choices. Ours:
 |---|---|---|
 | Price series | Adjusted close | Unadjusted reads a 2-for-1 split as -50% |
 | Return type | Simple (arithmetic) | Portfolio returns are the weighted arithmetic mean; log returns do not aggregate cross-sectionally |
-| Execution | T+1 close | Signal at close t, trade at close t+1 |
+| Execution | T+1 | Target set at close t is held for the return from t to t+1 — i.e. a closing-auction fill at t. The 21-day signal skip gives three weeks of notice, so this is implementable, not optimistic |
 | Turnover | **Two-way**: `sum|Δw|` | Many papers quote one-way, exactly half. A 2x difference in turnover is a 2x difference in costs |
 | Initial entry | Charged | Entering from cash is a real trade |
-| Cost model | Linear, 5 bps of turnover | No impact, no drift, static spreads |
+| Cost model | Linear, 5 bps per unit of one-way traded notional (a round trip costs 10) | No impact, no drift, static spreads |
 | Weight cap | Cap, residual to **cash** | Renormalising would ignore the limit it was asked to enforce |
 | Warm-up | No position until the signal exists | A 1-name portfolio during warm-up is an artefact, not a decision |
 | Sortino denominator | Full-sample | Dividing by the count of negative periods flatters strategies that rarely lose |
@@ -250,10 +250,16 @@ These are real and uncorrected:
 - **Survivorship bias.** Fixed universe of ETFs that exist today. Small for these nine
   cross-asset funds; severe if you point this code at single-name equities without
   point-in-time index membership and delisting returns.
-- **No weight drift.** Positions are assumed restored to target each period, so real turnover
-  is slightly higher than modelled.
+- **No weight drift — measured, and it runs the other way.** Positions are restored to target
+  each period rather than drifting. A full self-financing drift model gives Sharpe **0.775 vs
+  0.769** and turnover **4.47x vs 4.38x**, so the simplification understates turnover by ~2% and
+  slightly *understates* performance.
 - **Optimistic costs.** No market impact, static spreads, no taxes. All bias the result in the
   strategy's favour.
+- **A zero risk-free rate, which does flatter the strategy.** Its volatility (14.9%) is below
+  SPY's (19.9%), so a positive risk-free rate cuts its Sharpe by more. The +0.124 edge becomes
+  **+0.090 at 2%** and +0.073 at 3%; realistic bill yields over this sample put the honest figure
+  nearer +0.10. The direction reinforces the conclusion, which is no reason to leave it unstated.
 - **Low breadth.** Three positions from nine assets caps the achievable information ratio
   regardless of signal quality.
 - **One sample.** ~18 years, one market. For a monthly strategy the effective sample is closer
@@ -268,7 +274,9 @@ These are real and uncorrected:
 3. **Absolute-momentum overlay** — require a positive trailing return, not just a top-3 rank.
    Targets the failure mode where the "best" asset is still falling.
 4. **Wider universe** — breadth is the binding constraint.
-5. **Block bootstrap + Deflated Sharpe** — confidence intervals and a multiple-testing correction.
+5. **Walk-forward validation** — re-select parameters on a rolling past-only window and evaluate
+forward, repeatedly. The sensitivity grid shows the lookback dimension is unstable; this tests the
+consequence directly. The largest remaining gap.
 6. **Cross-check against VectorBT** — agreement is evidence the accounting is right.
 
 ---
@@ -279,9 +287,16 @@ Free adjusted ETF prices via `yfinance`. Raw and processed panels are cached to
 `data/` as Parquet with a provenance sidecar recording source, symbols, date range,
 and retrieval timestamp.
 
-If the download fails, the pipeline falls back to a **seeded synthetic panel** so the full
-pipeline and test suite still run offline. Every artefact from such a run is labelled — a result
-from synthetic data is a test of the software, not a research finding.
+**The synthetic fallback is off by default.** If the download fails the run stops rather than
+quietly substituting simulated prices — a synthetic momentum panel produces entirely
+plausible-looking results, which is exactly what makes silent substitution dangerous. Set
+`allow_synthetic_fallback: true` to opt in; those runs are stored under a `synthetic_*` cache key
+so they can never occupy the real provider's slot, and every artefact from them is labelled.
+
+Cached panels are refused unless their provenance sidecar confirms the source they came from, and
+the sidecar records the git commit and a SHA-256 of the panel contents — so a silently revised
+price history is detectable rather than invisible. (The test suite is unaffected: it builds its
+own panels with `source="synthetic"` and never touches the network.)
 
 ## Requirements
 
