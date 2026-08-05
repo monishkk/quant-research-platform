@@ -28,6 +28,7 @@ from quant_platform.data import load_prices_with_provenance, validate_price_pane
 from quant_platform.portfolio import run_backtest
 from quant_platform.returns import simple_returns
 from quant_platform.signals import build_target_weights
+from quant_platform.signals import rebalance_dates as build_rebalance_dates
 
 logger = logging.getLogger("quant_platform.run")
 
@@ -178,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("long-only strategy produced a negative weight")
 
     # ---- 3. Backtest ------------------------------------------------------ #
+    # The schedule is passed so the portfolio is traded back to target on every
+    # rebalance date, including the months when the top three are unchanged --
+    # positions still drift apart in between and restoring them costs money.
     strategy = run_backtest(
         returns=asset_returns,
         target_weights=target_weights,
@@ -186,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         slippage_bps=p["slippage_bps"],
         execution_lag=p["execution_lag"],
         periods_per_year=ppy,
+        rebalance_on=build_rebalance_dates(prices.index, s["rebalance"]),
         name=f"Momentum (top {s['holdings']})",
     )
     logger.info("Strategy: %r", strategy)
@@ -267,6 +272,33 @@ def main(argv: list[str] | None = None) -> int:
         marginals = validation.sensitivity_marginals(sensitivity, "sharpe")
         logger.info("Sensitivity grid: %d combinations evaluated", len(sensitivity))
 
+    # ---- 6a. Empirical random-selection null -------------------------------- #
+    # A single seeded random path is one draw from a wide distribution; whether
+    # the strategy beats it is then partly a statement about the seed. Many
+    # paths on the same calendar give the claim an actual p-value.
+    random_null = pd.DataFrame()
+    random_null_summary: dict = {}
+    if not args.skip_sensitivity:
+        try:
+            random_null, random_null_summary = validation.random_selection_null(
+                prices, asset_returns, strategy.net_returns,
+                n_paths=cfg.get("random_null", {}).get("n_paths", 300),
+                holdings=s["holdings"], rebalance=s["rebalance"],
+                max_weight=s.get("max_weight"), warmup=s["lookback_days"],
+                initial_capital=p["initial_capital"],
+                commission_bps=p["commission_bps"], slippage_bps=p["slippage_bps"],
+                execution_lag=p["execution_lag"], periods_per_year=ppy,
+                risk_free_rate=rf, seed=cfg.get("seed", 42),
+            )
+            logger.info(
+                "Random-selection null: %d paths, strategy at the %.1fth percentile (p=%.4f)",
+                random_null_summary["n_paths"],
+                random_null_summary["costed_percentile"] * 100,
+                random_null_summary["costed_p_value"],
+            )
+        except (ValueError, KeyError) as exc:
+            logger.warning("Random-selection null skipped: %s", exc)
+
     # ---- 6b. Statistical significance -------------------------------------- #
     # Runs after the grid because deflation needs to know how large the search
     # was: the hurdle a result must clear depends on how many were tried.
@@ -329,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         sensitivity.to_csv(out_dir / "sensitivity.csv", index=False)
     if not sig_table.empty:
         sig_table.to_csv(out_dir / "significance.csv", index=False)
+    if not random_null.empty:
+        random_null.to_csv(out_dir / "random_null_paths.csv", index=False)
     # The benchmark series ships alongside the strategy so that any sub-period
     # claim in the report (e.g. "the edge over 2010-2025 is negative") can be
     # re-derived from this one file, rather than having to be taken on trust.
@@ -347,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg, report, provenance, comparison, split_metrics, bench_splits,
         sensitivity, marginals, regimes, strategy, splits, show_test=args.show_test,
         leave_one_year_out=loyo, significance=sig_results,
+        random_null=random_null_summary,
     )
     kpis = build_kpis(comparison, strategy.name, split_metrics, show_test=args.show_test)
 
@@ -361,6 +396,10 @@ def main(argv: list[str] | None = None) -> int:
         "years": years.round(4),
         "loyo": loyo.round(4),
         "significance": sig_table,
+        "random_null": (
+            pd.DataFrame([random_null_summary]).T.rename(columns={0: "value"}).round(4)
+            if random_null_summary else pd.DataFrame()
+        ),
         **{f"sens_{k}": _label_marginal(df, k) for k, df in marginals.items()},
     }
 

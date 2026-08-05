@@ -129,7 +129,13 @@ def panel_checksum(long: pd.DataFrame) -> str:
     h = hashlib.sha256()
     h.update(numeric.tobytes())
     h.update("|".join(ordered["symbol"].astype(str)).encode("utf-8"))
-    h.update(ordered["date"].astype("int64").to_numpy().tobytes())
+    # Normalise the datetime resolution before hashing. Parquet stores dates as
+    # datetime64[ms] while the in-memory frame is datetime64[ns], so hashing the
+    # raw int64 makes identical dates differ by a factor of 10**6 -- which made
+    # the checksum mismatch on *every* cache read and cry wolf about corruption
+    # that was not there. The unit is an encoding detail; the instant is not.
+    stamps = pd.to_datetime(ordered["date"]).astype("datetime64[ns]").astype("int64")
+    h.update(stamps.to_numpy().tobytes())
     return h.hexdigest()
 
 
@@ -518,6 +524,14 @@ def load_prices_with_provenance(
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         long.to_parquet(raw_dir / f"{write_key}_{stamp}.parquet", index=False)
         long.to_parquet(processed_path, index=False)
+
+        # Checksum the *persisted* form, not the in-memory frame. Parquet does
+        # not round-trip every dtype identically (dates come back as
+        # milliseconds, for one), so hashing what is in memory at write time
+        # produces a digest the reader can never reproduce -- an integrity check
+        # that fails every single time, which is worse than none at all because
+        # it teaches the reader to ignore it.
+        long = standardise(pd.read_parquet(processed_path))
 
         prov = DataProvenance(
             source=actual_source,

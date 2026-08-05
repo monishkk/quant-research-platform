@@ -105,6 +105,7 @@ def build_narrative(
     show_test: bool = False,
     leave_one_year_out: pd.DataFrame | None = None,
     significance: dict | None = None,
+    random_null: dict | None = None,
 ) -> dict[str, str]:
     d, s, p = cfg["data"], cfg["strategy"], cfg["portfolio"]
     name = strategy.name
@@ -476,6 +477,7 @@ def build_narrative(
 
     # leave-one-year-out
     n["significance"] = _significance_prose(significance)
+    n["random_null"] = _random_null_prose(random_null, vs_rand)
 
     n["loyo"] = _p(
         "Each row deletes one calendar year and recomputes the strategy's Sharpe advantage "
@@ -765,6 +767,51 @@ def _rf_zero_caveat(f: dict, b: dict, risk_free_rate: float) -> str:
         "Short-term Treasury yields averaged well above zero across this sample, so the reported "
         "gap is the most favourable of the defensible choices.</li>"
     )
+
+
+def _random_null_prose(summary: dict | None, single_path_edge: float) -> str:
+    """Where the strategy falls in the distribution of random 3-of-N rotations.
+
+    Written to make the comparison interpretable rather than triumphant: a
+    percentile is only meaningful alongside the spread it came from, and the
+    cost-free variant is reported because the costed one partly measures
+    momentum's persistence rather than its selection.
+    """
+    if not summary:
+        return ""
+
+    n = summary["n_paths"]
+    strat = summary["strategy_sharpe"]
+    parts = [
+        _p(
+            f"A single random path answers very little -- it is one draw, and whether the "
+            f"strategy beats it is partly a statement about which seed was used. Across "
+            f"<strong>{n} independent random paths</strong> on the same rebalance calendar, "
+            f"paying the same costs, random 3-of-N selection returns a Sharpe of "
+            f"{_num(summary['costed_mean'], 3)} on average (sd {_num(summary['costed_sd'], 3)}, "
+            f"95th percentile {_num(summary['costed_p95'], 3)}). The strategy's "
+            f"{_num(strat, 3)} sits at the <strong>{summary['costed_percentile']:.1%}</strong> "
+            f"percentile, an empirical one-sided p-value of "
+            f"<strong>{summary['costed_p_value']:.4f}</strong>."
+        )
+    ]
+    parts.append(
+        _p(
+            f"That comparison is not entirely clean, because random reselection churns about "
+            f"{summary['mean_random_turnover']:.1f}x a year against the strategy's far lower "
+            f"turnover, so part of the gap is momentum being cheap to hold rather than good at "
+            f"choosing. Removing costs from the random paths entirely -- handing them an "
+            f"advantage the strategy does not get -- lifts them to "
+            f"{_num(summary['cost_free_mean'], 3)} on average, and the strategy still ranks at "
+            f"the {summary['cost_free_percentile']:.1%} percentile "
+            f"(p = {summary['cost_free_p_value']:.4f}). "
+            "<strong>The ranking is doing real work.</strong> That is a narrower claim than it "
+            "may appear: it says the signal beats chance within this universe, not that the "
+            "resulting portfolio beats a passive index -- which, as the sections above "
+            "establish, it does not."
+        )
+    )
+    return "\n".join(parts)
 
 
 def _significance_prose(significance: dict | None) -> str:

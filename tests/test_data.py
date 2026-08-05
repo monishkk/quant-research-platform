@@ -371,3 +371,32 @@ def test_read_provenance_reports_what_is_cached(tmp_path):
     found = read_provenance(SYMBOLS, "2015-01-01", "2016-12-31",
                             source="synthetic", data_dir=tmp_path)
     assert found == written
+
+
+def test_checksum_survives_the_parquet_round_trip(tmp_path):
+    """The recorded digest must be reproducible by a reader.
+
+    Regression test for a real defect: the checksum was computed on the
+    in-memory frame while verification ran on the frame read back from Parquet.
+    Dates return as milliseconds rather than nanoseconds, so the two digests
+    differed by construction and every cached load warned about corruption that
+    did not exist -- noise that trains a reader to ignore the alarm.
+    """
+    from quant_platform.data import load_prices_with_provenance, panel_checksum, standardise
+
+    _, prov = load_prices_with_provenance(
+        SYMBOLS, "2015-01-01", "2016-12-31",
+        source="synthetic", data_dir=tmp_path, seed=5,
+    )
+    stored = standardise(pd.read_parquet(next((tmp_path / "processed").glob("*.parquet"))))
+    assert panel_checksum(stored) == prov.data_sha256
+
+
+def test_reloading_from_cache_emits_no_integrity_warning(tmp_path, recwarn):
+    """A clean cache must load silently."""
+    from quant_platform.data import load_prices
+
+    kwargs = dict(source="synthetic", data_dir=tmp_path, seed=5)
+    load_prices(SYMBOLS, "2015-01-01", "2016-12-31", **kwargs)
+    load_prices(SYMBOLS, "2015-01-01", "2016-12-31", **kwargs)   # cache hit
+    assert not [w for w in recwarn if "checksum" in str(w.message).lower()]

@@ -34,9 +34,11 @@ import pandas as pd
 from quant_platform import metrics
 from quant_platform.portfolio import BacktestResult, buy_and_hold, run_backtest
 from quant_platform.signals import (
+    apply_max_weight,
     build_target_weights,
     equal_weight_all,
     random_selection_weights,
+    rebalance_dates,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ __all__ = [
     "make_splits",
     "evaluate_splits",
     "build_baselines",
+    "random_selection_null",
     "align_results",
     "run_sensitivity",
     "sensitivity_marginals",
@@ -175,11 +178,18 @@ def build_baselines(
         that dies with a small delay is a microstructure artefact, not an
         investable edge.
     """
+    # Every mandate here rebalances on the same calendar. Passing the schedule
+    # explicitly matters because a target that happens not to change is not the
+    # same thing as a portfolio that needs no trade: equal weight has a constant
+    # target, and momentum reselecting the same three names has a repeated one.
+    # Both still have to be traded back to target, and both should be billed.
+    schedule = rebalance_dates(prices.index, rebalance)
     common = dict(
         initial_capital=initial_capital,
         commission_bps=commission_bps,
         slippage_bps=slippage_bps,
         execution_lag=execution_lag,
+        rebalance_on=schedule,
     )
     momentum_weights = build_target_weights(
         prices, lookback, skip, holdings, rebalance, max_weight
@@ -187,8 +197,12 @@ def build_baselines(
 
     baselines: dict[str, BacktestResult] = {}
 
+    # Buy-and-hold is deliberately excluded from the schedule: a single-asset
+    # position has nothing to drift against, and "rebalancing" it would mean
+    # trading it against itself.
+    hold_only = {k: v for k, v in common.items() if k != "rebalance_on"}
     baselines["SPY buy & hold"] = buy_and_hold(
-        returns, benchmark_symbol, name=f"{benchmark_symbol} buy & hold", **common
+        returns, benchmark_symbol, name=f"{benchmark_symbol} buy & hold", **hold_only
     )
     baselines["Equal weight (all)"] = run_backtest(
         returns,
@@ -209,6 +223,7 @@ def build_baselines(
         commission_bps=0.0,
         slippage_bps=0.0,
         execution_lag=execution_lag,
+        rebalance_on=schedule,
         name="Momentum, zero cost",
     )
     baselines["Momentum, T+6 exec"] = run_backtest(
@@ -316,6 +331,7 @@ def run_sensitivity(
             commission_bps=cost_bps,
             slippage_bps=0.0,
             execution_lag=execution_lag,
+            rebalance_on=rebalance_dates(prices.index, reb),
             name=f"L{months}m_H{n_hold}_{reb}_{cost_bps}bps",
         )
         sub = res.slice(eval_start, eval_end)
@@ -342,6 +358,98 @@ def run_sensitivity(
         )
 
     return pd.DataFrame(rows)
+
+
+def random_selection_null(
+    prices: pd.DataFrame,
+    returns: pd.DataFrame,
+    strategy_returns: pd.Series,
+    *,
+    n_paths: int = 300,
+    holdings: int = 3,
+    rebalance: str = "monthly",
+    max_weight: float | None = 0.40,
+    warmup: int = 252,
+    initial_capital: float = 100_000.0,
+    commission_bps: float = 2.0,
+    slippage_bps: float = 3.0,
+    execution_lag: int = 1,
+    periods_per_year: int = 252,
+    risk_free_rate: float = 0.0,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, dict]:
+    """Empirical null: how good is a *random* 3-of-9 rotation in this universe?
+
+    A single seeded random path answers almost nothing. It is one draw from a
+    wide distribution, and whether the strategy beats it is then partly a
+    statement about which seed was chosen. The honest version generates many
+    paths on the same rebalance calendar and asks where the strategy falls in
+    the resulting distribution.
+
+    Two nulls are computed, because they answer different questions:
+
+    ``costed``
+        Random paths pay the same bps as the strategy. This is the investable
+        comparison -- but random reselection churns roughly four times as much,
+        so the handicap is doing part of the work.
+    ``cost-free``
+        Random paths pay nothing. This isolates whether the *ranking* carries
+        information, separate from momentum's advantage of being persistent and
+        therefore cheap to hold.
+
+    Returns the per-path table and a summary including the empirical one-sided
+    p-value: the fraction of random paths that matched or beat the strategy.
+    """
+    if n_paths < 2:
+        raise ValueError(f"n_paths must be >= 2, got {n_paths}")
+
+    schedule = rebalance_dates(prices.index, rebalance)
+    schedule = schedule[schedule >= prices.index[min(warmup, len(prices.index) - 1)]]
+    strategy_returns = strategy_returns.dropna()
+    if strategy_returns.empty:
+        raise ValueError("strategy_returns is empty")
+    start, end = strategy_returns.index[0], strategy_returns.index[-1]
+    strat_sharpe = metrics.annualized_sharpe(strategy_returns, periods_per_year, risk_free_rate)
+
+    rows: list[dict] = []
+    for i in range(n_paths):
+        rng = np.random.default_rng(seed + i)
+        picks = pd.DataFrame(0.0, index=schedule, columns=prices.columns)
+        for date in schedule:
+            eligible = prices.columns[prices.loc[date].notna()]
+            if len(eligible) == 0:
+                continue
+            chosen = rng.choice(eligible, size=min(holdings, len(eligible)), replace=False)
+            picks.loc[date, chosen] = 1.0 / len(chosen)
+        weights = apply_max_weight(picks, max_weight).reindex(prices.index).ffill().fillna(0.0)
+
+        row = {"path": i}
+        for label, bps in (("costed", commission_bps + slippage_bps), ("cost_free", 0.0)):
+            res = run_backtest(
+                returns, weights, initial_capital=initial_capital,
+                commission_bps=bps, slippage_bps=0.0, execution_lag=execution_lag,
+                rebalance_on=schedule, periods_per_year=periods_per_year,
+            ).slice(start, end)
+            row[f"sharpe_{label}"] = metrics.annualized_sharpe(
+                res.net_returns, periods_per_year, risk_free_rate)
+            if label == "costed":
+                row["cagr"] = metrics.annualized_return(res.net_returns, periods_per_year)
+                row["annual_turnover"] = metrics.annual_turnover(res.turnover, periods_per_year)
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    summary = {"strategy_sharpe": strat_sharpe, "n_paths": int(n_paths)}
+    for label in ("costed", "cost_free"):
+        col = table[f"sharpe_{label}"].dropna()
+        summary[f"{label}_mean"] = float(col.mean())
+        summary[f"{label}_sd"] = float(col.std(ddof=1))
+        summary[f"{label}_p95"] = float(col.quantile(0.95))
+        summary[f"{label}_max"] = float(col.max())
+        summary[f"{label}_percentile"] = float((col < strat_sharpe).mean())
+        # One-sided: how often does pure chance match or beat the strategy?
+        summary[f"{label}_p_value"] = float((col >= strat_sharpe).mean())
+    summary["mean_random_turnover"] = float(table["annual_turnover"].mean())
+    return table, summary
 
 
 def _common_live_date(

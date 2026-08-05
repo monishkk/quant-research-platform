@@ -241,12 +241,38 @@ def test_uninvested_residual_earns_cash_rate():
     returns = pd.DataFrame(0.0, index=idx, columns=["A"])
     weights = pd.DataFrame(0.40, index=idx, columns=["A"])
 
+    # Rebalanced every period, so the 40/60 split is held exactly and the
+    # closed form applies. Costs are zero, so the restoring trades are free.
     result = run_backtest(returns, weights, initial_capital=1.0, commission_bps=0,
-                          slippage_bps=0, cash_rate=0.10, periods_per_year=252)
+                          slippage_bps=0, cash_rate=0.10, periods_per_year=252,
+                          rebalance_on=idx)
 
-    # 60% in cash at 10% annualised, over the periods actually held.
     n = len(result.net_returns)
     assert result.equity.iloc[-1] == pytest.approx((1 + 0.60 * 0.10 / 252) ** n, rel=1e-9)
+
+
+def test_cash_share_grows_when_the_portfolio_is_left_to_drift():
+    """Without a rebalance schedule, a constant target is buy-and-hold.
+
+    The assets here return nothing while cash earns 10%, so the cash share must
+    rise and the portfolio must finish *ahead* of the constantly-rebalanced case
+    -- it drifts into the only thing that is paying. Getting this wrong in the
+    other direction is what the old constant-weight engine did: it silently
+    restored 40/60 every day and never charged for the trades.
+    """
+    idx = pd.bdate_range("2020-01-01", periods=253)
+    returns = pd.DataFrame(0.0, index=idx, columns=["A"])
+    weights = pd.DataFrame(0.40, index=idx, columns=["A"])
+
+    drift = run_backtest(returns, weights, initial_capital=1.0, commission_bps=0,
+                         slippage_bps=0, cash_rate=0.10, periods_per_year=252)
+    fixed = run_backtest(returns, weights, initial_capital=1.0, commission_bps=0,
+                         slippage_bps=0, cash_rate=0.10, periods_per_year=252,
+                         rebalance_on=idx)
+
+    assert drift.exposure.iloc[-1] < drift.exposure.iloc[0]     # drifts out of assets
+    assert drift.equity.iloc[-1] > fixed.equity.iloc[-1]
+    assert drift.turnover.iloc[1:].sum() == pytest.approx(0.0)  # and never trades
 
 
 # --------------------------------------------------------------------------- #
@@ -354,3 +380,75 @@ def test_clean_panel_is_unaffected_by_the_default_policy(growing_prices):
     weights = pd.DataFrame(1.0 / returns.shape[1], index=returns.index, columns=returns.columns)
     res = run_backtest(returns, weights, 1000.0, 0.0, 0.0)
     assert len(res.net_returns) > 0
+
+
+# --------------------------------------------------------------------------- #
+# Weight drift and self-financing accounting
+# --------------------------------------------------------------------------- #
+def test_holdings_drift_between_rebalances():
+    """Hand calculation: 50/50, one asset gains 10%, no scheduled trade.
+
+    Value: A = 0.5 x 1.10 = 0.550, B = 0.500, total 1.050.
+    Drifted weights: A = 0.550/1.050 = 0.523810, B = 0.476190.
+    The old engine reported 0.5/0.5 here and charged nothing for the restoring
+    trade it silently assumed.
+    """
+    idx = pd.bdate_range("2020-01-01", periods=4)
+    returns = pd.DataFrame({"A": [0.0, 0.10, 0.0, 0.0], "B": [0.0, 0.0, 0.0, 0.0]}, index=idx)
+    weights = pd.DataFrame(0.5, index=idx, columns=["A", "B"])
+
+    res = run_backtest(returns, weights, 1000.0, 0.0, 0.0, warmup_trim=False)
+
+    held = res.executed_weights
+    assert held.loc[idx[1], "A"] == pytest.approx(0.5)          # freshly set
+    assert held.loc[idx[2], "A"] == pytest.approx(0.550 / 1.050)
+    assert held.loc[idx[2], "B"] == pytest.approx(0.500 / 1.050)
+    assert held.loc[idx[2]].sum() == pytest.approx(1.0)         # still fully invested
+    assert res.turnover.loc[idx[2]] == pytest.approx(0.0)       # no target change, no trade
+
+
+def test_a_constant_target_is_still_traded_when_a_schedule_says_so():
+    """An equal-weight mandate has a target that never changes but must still trade.
+
+    Without the schedule this portfolio would drift forever and be billed
+    nothing -- which is how the equal-weight baseline came to report 0.05x
+    annual turnover for a monthly-rebalanced mandate.
+    """
+    idx = pd.bdate_range("2020-01-01", periods=6)
+    returns = pd.DataFrame({"A": [0.0, 0.10, 0.0, 0.0, 0.0, 0.0],
+                            "B": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, index=idx)
+    weights = pd.DataFrame(0.5, index=idx, columns=["A", "B"])
+
+    free = run_backtest(returns, weights, 1000.0, 0.0, 0.0, warmup_trim=False)
+    billed = run_backtest(returns, weights, 1000.0, 0.0, 0.0, warmup_trim=False,
+                          rebalance_on=idx)
+
+    assert free.turnover.iloc[2:].sum() == pytest.approx(0.0)
+    assert billed.turnover.iloc[2:].sum() > 0.0
+    # The restoring trade is exactly the drift away from target, both sides.
+    assert billed.turnover.loc[idx[2]] == pytest.approx(2 * abs(0.550 / 1.050 - 0.5))
+
+
+def test_drift_conserves_value_and_never_creates_exposure():
+    """Self-financing: weights sum to one whenever fully invested, always."""
+    idx = pd.bdate_range("2020-01-01", periods=60)
+    rng = np.random.default_rng(3)
+    returns = pd.DataFrame(rng.normal(0.001, 0.02, (60, 3)), index=idx, columns=list("ABC"))
+    weights = pd.DataFrame(1 / 3, index=idx, columns=list("ABC"))
+
+    res = run_backtest(returns, weights, 1000.0, 0.0, 0.0, warmup_trim=False)
+    live = res.executed_weights.iloc[1:]
+    assert np.allclose(live.sum(axis=1), 1.0)
+    assert (live >= -1e-12).all().all()
+
+
+def test_drift_and_no_drift_agree_when_nothing_moves():
+    """With zero returns there is nothing to drift, so the conventions coincide."""
+    idx = pd.bdate_range("2020-01-01", periods=30)
+    returns = pd.DataFrame(0.0, index=idx, columns=["A", "B"])
+    weights = pd.DataFrame(0.5, index=idx, columns=["A", "B"])
+
+    a = run_backtest(returns, weights, 1000.0, 5.0, 0.0, warmup_trim=False)
+    b = run_backtest(returns, weights, 1000.0, 5.0, 0.0, warmup_trim=False, allow_drift=False)
+    pd.testing.assert_series_equal(a.net_returns, b.net_returns)
+    pd.testing.assert_series_equal(a.turnover, b.turnover)

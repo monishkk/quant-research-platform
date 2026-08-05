@@ -27,26 +27,25 @@ notional** (so a round trip costs 10 bps), T+1 execution:
 
 | | Momentum (top 3) | SPY buy & hold | Equal weight | Random 3-of-9 |
 |---|---|---|---|---|
-| CAGR | 11.03% | **11.65%** | 8.27% | 6.67% |
-| Volatility | **14.90%** | 19.93% | 15.79% | 18.62% |
-| Sharpe | **0.78** | 0.65 | 0.58 | 0.44 |
-| Max drawdown | **-26.18%** | -51.48% | -43.27% | -50.66% |
-| Annual turnover | 4.33x | 0.00x | 0.00x | 15.82x |
+| CAGR | 10.78% | **11.65%** | 7.78% | 6.34% |
+| Volatility | **14.84%** | 19.93% | 15.86% | 18.55% |
+| Sharpe | **0.76** | 0.65 | 0.56 | 0.43 |
+| Max drawdown | **-26.32%** | -51.48% | -44.68% | -50.19% |
+| Annual turnover | 4.57x | 0.00x | 0.33x | 15.91x |
 
 ![Equity curve: momentum vs SPY, equal weight, and random selection](reports/momentum/equity_curve.png)
 
 **The honest reading — and the actual finding of this project:**
 
-> **Excluding 2008, the Sharpe advantage over SPY falls from +0.124 to −0.015. It disappears.**
+> **Excluding 2008, the Sharpe advantage over SPY falls from +0.111 to −0.029. It reverses.**
 
-No other year moves the edge by more than 0.07. Over 2010–2025 the strategy slightly
-*underperforms* SPY risk-adjusted (−0.053).
+No other year moves the edge by more than 0.07.
 
-A stationary block bootstrap (5,000 paired resamples, 17-day mean block) puts the 95% confidence
-interval on that +0.124 advantage at **[−0.243, +0.455]**, with **p = 0.485**. And because the
-192-cell sensitivity grid is itself a search, the edge has to clear the best Sharpe that many
-trials of pure noise would be expected to produce — a hurdle of **0.410**. Against it the
-**Deflated Sharpe Ratio is 0.700**, short of the conventional 0.95 bar.
+A stationary block bootstrap (5,000 paired resamples) puts the 95% confidence interval on that
++0.111 advantage at **[−0.258, +0.439]**, with **p = 0.530**. And because the 192-cell sensitivity
+grid is itself a search, the edge has to clear the best Sharpe that many trials of pure noise would
+be expected to produce — a hurdle of **0.404**. Against it the **Deflated Sharpe Ratio is 0.700**,
+short of the conventional 0.95 bar.
 
 Two things cut the other way, and the report says so: the parameters were pre-committed from the
 literature rather than picked from the grid, and the deflation assumes trials are independent when
@@ -54,18 +53,21 @@ neighbouring cells share most of their trades. But the direction of the result d
 
 Three further caveats the headline table hides:
 
-- The strategy earned **less money** than SPY (11.03% vs 11.65%) — it won on risk, not return.
-- Alpha is +5.47% (Newey–West t = 2.10, p = 0.035) but the information ratio is **−0.09**. Both
+- The strategy earned **less money** than SPY (10.78% vs 11.65%) — it won on risk, not return.
+- Alpha is +5.36% (Newey–West t = 2.06, p = 0.040) but the information ratio is **−0.11**. Both
   are correct: alpha is beta-adjusted, the information ratio is not. The alpha clears 5% by a
   small margin and would not survive a correction for the number of tests here.
-- It beat SPY in only **8 of 18 calendar years**.
+- It beat SPY in only **7 of 18 calendar years**.
 
-What it *is*: a defensive cross-asset rotation. It gives up 6.7%/yr in rising markets (76% of the
-sample) and gains 13.1%/yr in falling ones (21%). That is a coherent economic story, and it
+What it *is*: a defensive cross-asset rotation. It gives up 6.9%/yr in rising markets (76% of the
+sample) and gains 12.6%/yr in falling ones (21%). That is a coherent economic story, and it
 explains the low beta, the halved drawdown, and the below-index return.
 
-What did **not** fail: costs (0.014 of Sharpe), execution delay (0.11 at T+6), and the ranking
-versus random selection (+0.34). The implementation is sound *under the conventions it states* —
+What did **not** fail: costs (0.015 of Sharpe), execution delay (0.09 at T+6), and above all the
+ranking itself — against **300 random 3-of-9 rotations** on the same calendar the strategy ranks
+above *every one*, and still does when the random paths are handed zero transaction costs
+(p < 0.005 either way). The signal beats chance within this universe; it just does not beat a
+passive index. The implementation is sound *under the conventions it states* —
 weight drift, market impact, taxes and a non-zero risk-free rate are all unmodelled, and each is
 listed below. The honest reading of a sound implementation is that the effect is small and
 crisis-dependent.
@@ -95,7 +97,7 @@ Run the test suite:
 python -m pytest
 ```
 
-183 tests, ~5 seconds. They are the reason to trust anything above.
+197 tests, ~8 seconds. They are the reason to trust anything above.
 
 ---
 
@@ -111,6 +113,7 @@ reports/momentum/
 ├── calendar_years.csv          # year-by-year vs benchmark
 ├── leave_one_year_out.csv      # how much of the edge rests on any single year
 ├── significance.csv            # bootstrap CI, p-value, Deflated Sharpe, noise hurdle
+├── random_null_paths.csv       # 300 random 3-of-9 rotations: the empirical null
 ├── strategy_timeseries.csv     # strategy + benchmark returns, turnover, costs, exposure
 ├── equity_curve.png            drawdown.png            rolling_sharpe.png
 ├── rolling_volatility.png      turnover.png            exposure.png
@@ -135,8 +138,9 @@ Useful flags:
 ### 1. One shift, in one place
 
 ```python
-executed_weights = target_weights.shift(execution_lag)   # lag >= 1
-gross_returns    = (executed_weights * asset_returns).sum(axis=1)
+executed = target_weights.shift(execution_lag)     # lag >= 1: what we want, when
+held     = drift(executed, asset_returns)          # what we actually have
+gross    = (held * asset_returns).sum(axis=1)
 ```
 
 `prices.loc[t]` is the **close** at t, so `returns.loc[t]` is the return over `(t-1, t]` and is
@@ -252,10 +256,12 @@ These are real and uncorrected:
 - **Survivorship bias.** Fixed universe of ETFs that exist today. Small for these nine
   cross-asset funds; severe if you point this code at single-name equities without
   point-in-time index membership and delisting returns.
-- **No weight drift — measured, and it runs the other way.** Positions are restored to target
-  each period rather than drifting. A full self-financing drift model gives Sharpe **0.775 vs
-  0.769** and turnover **4.47x vs 4.38x**, so the simplification understates turnover by ~2% and
-  slightly *understates* performance.
+- **Weight drift is now modelled.** Holdings drift with relative performance between rebalances
+  and trades are priced off the actual pre-trade position, so turnover reflects what a portfolio
+  would really have to trade. Correcting this raised measured turnover from 4.33x to **4.57x** and
+  moved Sharpe from 0.777 to **0.764**. It mattered far more to the equal-weight baseline, whose
+  constant target had previously produced a reported turnover of *zero* for a monthly-rebalanced
+  mandate.
 - **Optimistic costs.** No market impact, static spreads, no taxes. All bias the result in the
   strategy's favour.
 - **A zero risk-free rate, which does flatter the strategy.** Its volatility (14.9%) is below

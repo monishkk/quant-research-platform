@@ -183,17 +183,31 @@ def test_executed_weights_lag_target_weights(realistic_prices, lag):
     """
     returns = simple_returns(realistic_prices)
     weights = build_target_weights(realistic_prices, 252, 21, 3, "monthly", 0.40)
-    result = run_backtest(returns, weights, execution_lag=lag, warmup_trim=False)
 
+    # allow_drift=False isolates the timing convention from the drift model:
+    # with no drift the held position IS the lagged target, every period, so the
+    # shift can be asserted directly.
+    result = run_backtest(returns, weights, execution_lag=lag, warmup_trim=False,
+                          allow_drift=False)
     expected = result.target_weights.shift(lag).fillna(0.0)
     pd.testing.assert_frame_equal(result.executed_weights, expected)
+
+    # With drift on -- the default -- the identity holds on the periods where a
+    # trade actually happens. In between, holdings move with returns, which is
+    # the point of the drift model and not a timing change.
+    drifted = run_backtest(returns, weights, execution_lag=lag, warmup_trim=False)
+    traded = drifted.turnover > 0
+    pd.testing.assert_frame_equal(
+        drifted.executed_weights[traded], expected[traded]
+    )
 
 
 def test_trimmed_executed_weights_still_lag_the_untrimmed_target(realistic_prices):
     """After trimming, executed[t] must still equal the *original* target[t-1]."""
     returns = simple_returns(realistic_prices)
     weights = build_target_weights(realistic_prices, 252, 21, 3, "monthly", 0.40)
-    result = run_backtest(returns, weights, execution_lag=1, warmup_trim=True)
+    result = run_backtest(returns, weights, execution_lag=1, warmup_trim=True,
+                          allow_drift=False)
 
     expected = weights.shift(1).fillna(0.0).loc[result.index]
     pd.testing.assert_frame_equal(result.executed_weights, expected)

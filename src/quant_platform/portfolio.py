@@ -50,6 +50,7 @@ import logging
 import warnings
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 from quant_platform.costs import CostModel, compute_turnover
@@ -141,6 +142,8 @@ def run_backtest(
     execution_lag: int = 1,
     cash_rate: float = 0.0,
     on_missing: str = "raise",
+    allow_drift: bool = True,
+    rebalance_on: pd.DatetimeIndex | None = None,
     periods_per_year: int = 252,
     name: str = "strategy",
     warmup_trim: bool = True,
@@ -198,15 +201,19 @@ def run_backtest(
     _check_returns_available(executed_weights, asset_returns, on_missing)
 
     # ---- stage: executed position -> portfolio return -------------------- #
-    exposure = executed_weights.sum(axis=1)
+    held_weights, turnover = _simulate_holdings(
+        executed_weights, asset_returns, cash_rate, periods_per_year, allow_drift,
+        _executed_rebalance_positions(executed_weights.index, rebalance_on, execution_lag),
+    )
+
+    exposure = held_weights.sum(axis=1)
     cash_weight = 1.0 - exposure
 
-    asset_pnl = (executed_weights * asset_returns.fillna(0.0)).sum(axis=1)
+    asset_pnl = (held_weights * asset_returns.fillna(0.0)).sum(axis=1)
     cash_pnl = cash_weight * (cash_rate / periods_per_year)
     gross_returns = asset_pnl + cash_pnl
 
     cost_model = CostModel(commission_bps=commission_bps, slippage_bps=slippage_bps)
-    turnover = compute_turnover(executed_weights)
     costs = cost_model.apply(turnover)
 
     net_returns = gross_returns - costs
@@ -229,7 +236,9 @@ def run_backtest(
         costs=costs,
         turnover=turnover,
         exposure=exposure,
-        executed_weights=executed_weights,
+        # What was actually held each period: equal to the target on rebalance
+        # dates, and the drifted position in between.
+        executed_weights=held_weights,
         target_weights=weights,
         initial_capital=float(initial_capital),
         cost_model=cost_model,
@@ -276,6 +285,103 @@ def _align(
         returns.loc[common_idx, common_cols],
         target_weights.loc[common_idx, common_cols].fillna(0.0),
     )
+
+
+def _executed_rebalance_positions(
+    index: pd.DatetimeIndex, rebalance_on: pd.DatetimeIndex | None, execution_lag: int
+) -> set[int]:
+    """Row positions at which the portfolio is restored to target.
+
+    ``rebalance_on`` holds the dates on which the *target* is set. A target set
+    at date R is executed ``execution_lag`` periods later, so the trade lands at
+    position ``pos(R) + lag``. Passing the schedule matters whenever the target
+    can repeat: an equal-weight mandate has a target that never changes, and a
+    momentum portfolio that reselects the same three assets two months running
+    has one that changes only sometimes. Without the schedule both would look
+    like "no trade needed" and drift indefinitely, which is buy-and-hold wearing
+    a rebalanced portfolio's name.
+    """
+    if rebalance_on is None or len(index) == 0:
+        return set()
+    positions = index.get_indexer(pd.DatetimeIndex(rebalance_on))
+    return {int(p) + execution_lag for p in positions
+            if p >= 0 and 0 <= p + execution_lag < len(index)}
+
+
+def _simulate_holdings(
+    executed_weights: pd.DataFrame,
+    asset_returns: pd.DataFrame,
+    cash_rate: float,
+    periods_per_year: int,
+    allow_drift: bool,
+    rebalance_positions: set[int] | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Track what is actually held, period by period, and what trading it costs.
+
+    The distinction this exists to capture: a *target* weight is what you want,
+    a *held* weight is what you have. Between rebalances they diverge, because
+    positions grow and shrink with their own returns. Applying the target
+    directly to returns -- the obvious implementation -- silently assumes the
+    portfolio is restored to target every single period, and since the target
+    has not changed, a turnover measured as ``target.diff()`` reports zero. The
+    result is free daily rebalancing: the portfolio captures the rebalancing
+    premium and is never billed for the trades that produce it.
+
+    The effect on this strategy is small and, as it happens, favours the
+    corrected version. It is not small for a constant-target mandate: an
+    equal-weight portfolio has a target that *never* changes, so the old
+    accounting charged it nothing at all while still crediting it with monthly
+    rebalancing it never paid for.
+
+    Holdings evolve self-financingly::
+
+        earned_t   = h_{t-1} . r_t                      (on what was held)
+        grown_i    = h_{t-1,i} (1 + r_{t,i})            (position values)
+        drifted    = grown / (1 + earned_t)             (renormalised)
+
+    and a trade happens only when the target changes, priced off the *drifted*
+    holdings rather than off last period's target.
+
+    ``allow_drift=False`` restores the older constant-weight behaviour, kept so
+    the two conventions can be compared rather than argued about.
+    """
+    cols = list(executed_weights.columns)
+    idx = executed_weights.index
+    rebalance_positions = rebalance_positions or set()
+    if not allow_drift:
+        return executed_weights, compute_turnover(executed_weights)
+
+    targets = executed_weights.to_numpy(dtype=float)
+    rets = asset_returns.reindex(index=idx, columns=cols).fillna(0.0).to_numpy(dtype=float)
+
+    n, k = targets.shape
+    held = np.zeros((n, k), dtype=float)
+    turnover = np.zeros(n, dtype=float)
+    current = np.zeros(k, dtype=float)
+    cash_per_period = cash_rate / periods_per_year
+
+    for t in range(n):
+        # Order matters: trade into the target FIRST, then earn the period's
+        # return on what is actually held. Drifting before rebalancing would
+        # delay every trade by a period and quietly reintroduce a timing error.
+        want = targets[t]
+        scheduled = t in rebalance_positions
+        changed = t == 0 or not np.allclose(want, targets[t - 1], atol=1e-12, rtol=0.0)
+        if scheduled or changed:
+            turnover[t] = float(np.abs(want - current).sum())
+            current = want.copy()
+
+        held[t] = current
+
+        # Self-financing update. Cash is the residual 1 - sum(weights) and grows
+        # at the cash rate, so total value is 1 + earned and the renormalised
+        # asset weights plus the residual cash weight still sum to one.
+        earned = float(current @ rets[t]) + (1.0 - current.sum()) * cash_per_period
+        grown = current * (1.0 + rets[t])
+        denom = 1.0 + earned
+        current = grown / denom if abs(denom) > 1e-12 else grown
+
+    return pd.DataFrame(held, index=idx, columns=cols), pd.Series(turnover, index=idx)
 
 
 def _check_returns_available(
